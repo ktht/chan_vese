@@ -206,18 +206,22 @@ int
 main(int argc,
      char ** argv)
 {
-  /// @todo add lambda1 and lambda2 as vector arguments
+
+///-- @todo add lambda1 and lambda2 as vector arguments
+
   std::string input_filename;
   double mu, nu;
+  bool grayscale = false;
   try
   {
     namespace po = boost::program_options;
     po::options_description desc("Allowed options");
     desc.add_options()
-      ("help,h",                                                "produce help message")
-      ("input,i", po::value<std::string>(&input_filename),      "input image")
-      ("mu",      po::value<double>(&mu) -> default_value(0.5), "length penalty parameter")
-      ("nu",      po::value<double>(&nu) -> default_value(0),   "area penalty parameter")
+      ("help,h",                                                    "this message")
+      ("input,i",     po::value<std::string>(&input_filename),      "input image")
+      ("mu",          po::value<double>(&mu) -> default_value(0.5), "length penalty parameter")
+      ("nu",          po::value<double>(&nu) -> default_value(0),   "area penalty parameter")
+      ("grayscale,g",                                               "read in as grayscale")
     ;
     po::variables_map vm;
     po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
@@ -243,6 +247,10 @@ main(int argc,
         return EXIT_FAILURE;
       }
     }
+    if(vm.count("grayscale"))
+    {
+      grayscale = true;
+    }
   }
   catch(std::exception & e)
   {
@@ -250,32 +258,43 @@ main(int argc,
     return EXIT_FAILURE;
   }
 
-  const cv::Mat _img = cv::imread(input_filename, CV_LOAD_IMAGE_COLOR);
+///-- Read the image (grayscale or BGR? RGB? BGR? help)
+  cv::Mat _img;
+  if(grayscale) _img = cv::imread(input_filename, CV_LOAD_IMAGE_GRAYSCALE);
+  else          _img = cv::imread(input_filename, CV_LOAD_IMAGE_COLOR);
   if(! _img.data)
   {
     std::cerr << "\nError on opening " << input_filename <<" "
               << "(probably not an image)!\n\n";
     return EXIT_FAILURE;
   }
+///-- Second conversion needed if we want to display a colored contour
+///   on a grayscale image
   cv::Mat img;
-  cv::cvtColor(_img, img, CV_BGR2RGB);
+  if(grayscale) cv::cvtColor(_img, img, CV_GRAY2RGB);
+  else          img = _img;
+
+///-- Determine the constants
   const int h = img.rows;
   const int w = img.cols;
+  const int nof_channels = grayscale ? 1 : img.channels();
+
+///-- Construct the level set
   levelset u;
-  //levelset_rect(u, w, h, 4);
-  //levelset_circ(u, w, h, 0.5);
   levelset_checkerboard(u, w, h);
 
+///-- Split the channels
+  std::vector<cv::Mat> channels;
+  channels.reserve(nof_channels);
+  cv::split(img, channels);
+
+
+///-- Display the zero level set
   cv::Mat nw_img = img.clone();
   draw_contour(nw_img, u);
-
   cv::namedWindow("Display window", cv::WINDOW_NORMAL);
   cv::imshow("Display window", img);
   cv::waitKey(1000);
-  std::cout << "R" << static_cast<int>(img.at<cv::Vec3b>(0, 0)[0]) << " "
-               "G" << static_cast<int>(img.at<cv::Vec3b>(0, 0)[1]) << " "
-               "B" << static_cast<int>(img.at<cv::Vec3b>(0, 0)[2]) << "\n";
-
   cv::imshow("Display window", nw_img);
   cv::waitKey(0);
 
