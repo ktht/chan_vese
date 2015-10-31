@@ -24,7 +24,10 @@ INCLUDES = -I$(INCLUDE_PATH) \
 LD_PATHS = -L$(BOOST_PATH)/lib
 LIBS     = -lopencv_core \
            -lopencv_imgproc \
-           -lopencv_highgui
+           -lopencv_highgui \
+           -lboost_program_options \
+           -lboost_system \
+           -lboost_filesystem
 
 SRCS      = main.cpp
 TEST      =
