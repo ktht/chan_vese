@@ -50,7 +50,7 @@
 
 /**
  * @file
- * @todo Switch from levelset (aka std::vector<std::vector<double>>) to cv::Mat of type CV_64FC1
+ * @todo Add option to specify the initial contour from command line
  */
 
 typedef unsigned char uchar;
@@ -132,7 +132,7 @@ regularized_delta(double x,
  */
 double
 region_variance(const cv::Mat & img,
-                const levelset & u,
+                const cv::Mat & u,
                 int h,
                 int w,
                 Region region,
@@ -147,7 +147,7 @@ region_variance(const cv::Mat & img,
   {
     for(int j = 0; j < w; ++j)
     {
-      double h = H(u[i][j]);
+      double h = H(u.at<double>(i, j));
       nom += img.at<uchar>(i, j) * h;
       denom += h;
     }
@@ -157,105 +157,84 @@ region_variance(const cv::Mat & img,
 
 /**
  * @brief Creates a level set with rectangular zero level set
- * @param u Empty level set (will be modified)
  * @param w Width of the level set matrix
  * @param h Height of the level set matrix
  * @param l Offset in pixels from the underlying image borders
- * @return 0 if success
- *         1 if the given level set is not empty
+ * @return The levelset
+ * @todo Add support for offsets from all borders
  */
-int
-levelset_rect(levelset & u,
-              int h,
+cv::Mat
+levelset_rect(int h,
               int w,
               int l)
 {
-  if(! u.empty()) return 1;
-  u.reserve(h);
+  cv::Mat u(h, w, CV_64FC1);
+  u.setTo(cv::Scalar(1));
+  for(int i = 0; i < l; ++i)
+  {
+    u.row(i) = cv::Scalar(-1);
+    u.row(h - i - 1) = cv::Scalar(-1);
+  }
+  for(int j = 0; j < l; ++j)
+  {
+    u.col(j) = cv::Scalar(-1);
+    u.col(w - j - 1) = cv::Scalar(-1);
+  }
 
-  std::vector<double> tb_row(w, -1);
-  std::vector<double> m_row(w, 1);
-  std::fill(m_row.begin(), m_row.begin() + l, -1);
-  std::fill(m_row.rbegin(), m_row.rbegin() + l, -1);
-
-  for(int i = 0; i < l; ++i)     u.push_back(tb_row);
-  for(int i = l; i < h - l; ++i) u.push_back(m_row);
-  for(int i = h - l; i < h; ++i) u.push_back(tb_row);
-
-  return 0;
+  return u;
 }
 
 /**
  * @brief Creates a level set with circular zero level set
- * @param u Empty level set (will be modified)
  * @param w Width of the level set matrix
  * @param h Height of the level set matrix
  * @param d Diameter of the circle in relative units
  *          Its value must be within (0, 1); 1 indicates that
  *          the diameter is minimum of the image dimensions
- * @return 0 if success,
- *         1 if the given level set is not empty
- *         2 if the diameter is invalid
+ * @return The level set
  */
-int
-levelset_circ(levelset & u,
-              int h,
+cv::Mat
+levelset_circ(int h,
               int w,
               double d)
 {
-  if(! u.empty()) return 1;
-  if(d < 0 || d > 1) return 2;
+  cv::Mat u(h, w, CV_64FC1);
 
   const int r = std::min(w, h) * d / 2;
   const int mid_x = w / 2;
   const int mid_y = h / 2;
 
-  u.reserve(h);
   for(int i = 0; i < h; ++i)
-  {
-    std::vector<double> row(w, -1);
     for(int j = 0; j < w; ++j)
     {
       const double d = std::sqrt(std::pow(mid_x - i, 2) +
                                  std::pow(mid_y - j, 2));
-      if(d < r) row[j] = 1;
+      if(d < r) u.at<double>(i, j) = 1;
+      else      u.at<double>(i, j) = -1;
     }
-    u.push_back(row);
-  }
 
-  return 0;
+  return u;
 }
 
 /**
  * @brief Creates a level set with a checkerboard pattern at zero level
  *        The zero level set is found via the formula
  *        @f[ $ \mathrm{sign}\sin\Big(\frac{x}{5}\Big)\sin\Big(\frac{y}{5}\Big) $ @f].
- * @param u Empty level set (will be modified)
  * @param w Width of the level set matrix
  * @param h Height of the level set matrix
- * @return 0 if success
- *         1 if the given level set is not empty
+ * @return The levelset
  */
-int
-levelset_checkerboard(levelset & u,
-                      int h,
+cv::Mat
+levelset_checkerboard(int h,
                       int w)
 {
-  if(! u.empty()) return 1;
-
-  u.reserve(h);
+  cv::Mat u(h, w, CV_64FC1);
   const double pi = boost::math::constants::pi<double>();
   for(int i = 0; i < h; ++i)
-  {
-    std::vector<double> row;
-    row.reserve(w);
     for(int j = 0; j < w; ++j)
-      row.push_back(boost::math::sign(std::sin(pi * i / 5) *
-                                      std::sin(pi * j / 5)));
-    u.push_back(row);
-  }
-
-  return 0;
+      u.at<double>(i, j) = (boost::math::sign(std::sin(pi * i / 5) *
+                                              std::sin(pi * j / 5)));
+  return u;
 }
 
 /**
@@ -268,20 +247,15 @@ levelset_checkerboard(levelset & u,
  * @sa draw_contour
  */
 cv::Mat
-levelset2contour(const levelset & u)
+levelset2contour(const cv::Mat & u)
 {
-  const int h = u.size();
-  const int w = u.at(0).size();
+  const int h = u.rows;
+  const int w = u.cols;
   cv::Mat c(h, w, CV_8UC1);
 
   for(int i = 0; i < h; ++i)
-  {
     for(int j = 0; j < w; ++j)
-    {
-      const double val = u.at(i).at(j);
-      c.at<uchar>(i, j) = val <= 0 ? 0 : 255;
-    }
-  }
+      c.at<uchar>(i, j) = u.at<double>(i, j) <= 0 ? 0 : 255;
 
   return c;
 }
@@ -295,7 +269,7 @@ levelset2contour(const levelset & u)
  */
 int
 draw_contour(cv::Mat & dst,
-             const levelset & u)
+             const cv::Mat & u)
 {
   cv::Mat th;
   std::vector<std::vector<cv::Point>> cs;
@@ -495,8 +469,7 @@ main(int argc,
   const auto delta = std::bind(regularized_delta, std::placeholders::_1, eps);
 
 ///-- Construct the level set
-  levelset u;
-  levelset_checkerboard(u, h, w);
+  cv::Mat u = levelset_checkerboard(h, w);
 
 ///-- Split the channels
   std::vector<cv::Mat> channels;
@@ -533,6 +506,7 @@ main(int argc,
       u_diff += -variance_inside + variance_outside;
     }
     u_diff /= nof_channels;
+    // add divergence
 ///-- Check if we have achieved the desired precision
   }
 
