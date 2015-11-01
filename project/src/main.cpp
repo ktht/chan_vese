@@ -1,11 +1,12 @@
 #include <iostream> // std::cout, std::cerr
-#include <cstdlib> // EXIT_SUCCESS
+#include <cstdlib> // EXIT_SUCCESS, EXIT_FAILURE
 #include <vector> // std::vector<>
 #include <algorithm> // std::min()
 #include <cmath> // std::pow(), std::sqrt(), std::sin(), std::atan()
 #include <exception> // std::exception
 #include <string> // std::string
 #include <functional> // std::function<>, std::bind(), std::placeholders::_1
+#include <limits> // std::numeric_limits<>
 
 #include <opencv2/imgproc/imgproc.hpp> // cv::cvtColor(), CV_BGR2RGB cv::threshold(),
                                        // cv::findContours(), cv::drawContours(),
@@ -13,7 +14,8 @@
 #include <opencv2/highgui/highgui.hpp> // cv::imread(), CV_LOAD_IMAGE_COLOR, cv::WINDOW_NORMAL,
                                        // cv::imshow(), cv::waitKey(), cv::namedWindow()
 
-                                       // cv::Mat, cv::Scalar, cv::Vec4i, cv::Point
+                                       // cv::Mat, cv::Scalar, cv::Vec4i, cv::Point, cv::norm(),
+                                       // cv::NORM_L2, CV_64FC1, CV_64FC1
 
 #include <boost/math/special_functions/sign.hpp> // boost::math::sign()
 
@@ -40,15 +42,42 @@
 #pragma clang diagnostic pop
 #endif
 
+#if defined(_WIN32)
+#include <windows.h> // CONSOLE_SCREEN_BUFFER_INFO, GetConsoleScreenBufferInfo, GetStdHandle, STD_OUTPUT_HANDLE
+#elif defined(__unix__)
+#include <sys/ioctl.h> // struct winsize, ioctl(), TIOCGWINSZ
+#endif
+
 /**
  * @file
- * @todo add lambda1 and lambda2 as vector arguments
  */
 
 typedef unsigned char uchar;
+typedef unsigned long ulong;
 typedef std::vector<std::vector<double>> levelset;
 
 enum Region { Inside, Outside };
+
+/**
+ * @brief Returns terminal width.
+ *        Should work on all popular platforms.
+ * @return Terminal width
+ * @note Untested on Windows and MacOS.
+ *       Credit to user 'quantum': http://stackoverflow.com/q/6812224/4056193
+ */
+int
+get_terminal_width()
+{
+#if defined(_WIN32)
+  CONSOLE_SCREEN_BUFFER_INFO csbi;
+  GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi);
+  return static_cast<int>(csbi.srWindow.Right - csbi.srWindow.Left + 1);
+#elif defined(__unix__)
+  struct winsize max;
+  ioctl(0, TIOCGWINSZ, &max);
+  return static_cast<int>(max.ws_col);
+#endif
+}
 
 /**
  * @brief Regularized (smoothed) Heaviside step function
@@ -83,8 +112,8 @@ regularized_delta(double x,
 double
 region_variance(const cv::Mat & img,
                 const levelset & u,
-                int w,
                 int h,
+                int w,
                 Region region,
                 std::function<double(double)> heaviside)
 {
@@ -116,8 +145,8 @@ region_variance(const cv::Mat & img,
  */
 int
 levelset_rect(levelset & u,
-              int w,
               int h,
+              int w,
               int l)
 {
   if(! u.empty()) return 1;
@@ -149,8 +178,8 @@ levelset_rect(levelset & u,
  */
 int
 levelset_circ(levelset & u,
-              int w,
               int h,
+              int w,
               double d)
 {
   if(! u.empty()) return 1;
@@ -188,8 +217,8 @@ levelset_circ(levelset & u,
  */
 int
 levelset_checkerboard(levelset & u,
-                      int w,
-                      int h)
+                      int h,
+                      int w)
 {
   if(! u.empty()) return 1;
 
@@ -270,19 +299,30 @@ main(int argc,
      char ** argv)
 {
   std::string input_filename;
-  double mu, nu, eps;
+  double mu, nu, eps, tol, dt;
+  int max_steps;
+  std::vector<double> lambda1, lambda2;
   bool grayscale = false;
+
+///-- Parse command line arguments
+///   Negative values in multitoken are not an issue, b/c it doesn't make much sense
+///   to use negative values for lambda1 and lambda2
   try
   {
     namespace po = boost::program_options;
-    po::options_description desc("Allowed options");
+    po::options_description desc("Allowed options", get_terminal_width());
     desc.add_options()
-      ("help,h",                                                    "this message")
-      ("input,i",     po::value<std::string>(&input_filename),      "input image")
-      ("mu",          po::value<double>(&mu) -> default_value(0.5), "length penalty parameter")
-      ("nu",          po::value<double>(&nu) -> default_value(0),   "area penalty parameter")
-      ("grayscale,g",                                               "read in as grayscale")
-      ("epsilon,e",   po::value<double>(&eps) -> default_value(1),  "smoothing param in Heaviside/delta")
+      ("help,h",                                                                "this message")
+      ("input,i",     po::value<std::string>(&input_filename),                  "input image")
+      ("mu",          po::value<double>(&mu) -> default_value(0.5),             "length penalty parameter")
+      ("nu",          po::value<double>(&nu) -> default_value(0),               "area penalty parameter")
+      ("dt",          po::value<double>(&dt) -> default_value(1),               "timestep")
+      ("lambda1",     po::value<std::vector<double>>(&lambda1) -> multitoken(), "penalty of variance inside the contour (default: 1's)")
+      ("lambda2",     po::value<std::vector<double>>(&lambda2) -> multitoken(), "penalty of variance outside the contour (default: 1's)")
+      ("epsilon,e",   po::value<double>(&eps) -> default_value(1),              "smoothing param in Heaviside/delta")
+      ("tolerance,t", po::value<double>(&tol) -> default_value(0.001),          "tolerance in stopping condition")
+      ("max-steps,N", po::value<int>(&max_steps) -> default_value(-1),          "maximum nof iterations (default: unlimited)")
+      ("grayscale,g", po::bool_switch(&grayscale),                              "read in as grayscale")
     ;
     po::variables_map vm;
     po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
@@ -295,22 +335,79 @@ main(int argc,
     }
     if(! vm.count("input"))
     {
-      std::cerr << "\nError: you have to specify input file name!\n\n"
-                << desc << "\n";
+      std::cerr << "\nError: you have to specify input file name!\n\n";
       return EXIT_FAILURE;
     }
-    if(vm.count("input"))
+    else if(vm.count("input") && ! boost::filesystem::exists(input_filename))
     {
-      if(! boost::filesystem::exists(input_filename))
+      std::cerr << "\nError: file \"" << input_filename << "\" does not exists!\n\n";
+      return EXIT_FAILURE;
+    }
+    if(vm.count("dt") && dt < 0)
+    {
+      std::cerr << "\nCannot have negative timestep: " << dt << ".\n\n";
+      return EXIT_FAILURE;
+    }
+    if(vm.count("lambda1"))
+    {
+      if(grayscale && lambda1.size() != 1)
       {
-        std::cerr << "\nError: file \"" << input_filename << "\" does not exists!\n\n"
-                  << desc << "\n";
+        std::cerr << "\nToo many lambda1 values for a grayscale image.\n\n";
+        return EXIT_FAILURE;
+      }
+      else if(!grayscale && lambda1.size() != 3)
+      {
+        std::cerr << "\nNumber of lambda1 values must be 3 for a colored input image.\n\n";
+        return EXIT_FAILURE;
+      }
+      if(grayscale && lambda1.size() == 1 && lambda1[0] < 0)
+      {
+        std::cerr << "\nThe value of lambda1 cannot be negative.\n\n";
         return EXIT_FAILURE;
       }
     }
-    if(vm.count("grayscale"))
+    else if(! vm.count("lambda1"))
     {
-      grayscale = true;
+      if(grayscale) lambda1 = {1};
+      else          lambda1 = {1, 1, 1};
+    }
+    if(vm.count("lambda2"))
+    {
+      if(grayscale && lambda2.size() != 1)
+      {
+        std::cerr << "\nToo many lambda2 values for a grayscale image.\n\n";
+        return EXIT_FAILURE;
+      }
+      else if(!grayscale && lambda2.size() != 3)
+      {
+        std::cerr << "\nNumber of lambda2 values must be 3 for a colored input image.\n\n";
+        return EXIT_FAILURE;
+      }
+      if(grayscale && lambda2.size() == 1 && lambda2[0] < 0)
+      {
+        std::cerr << "\nThe value of lambda1 cannot be negative.\n\n";
+        return EXIT_FAILURE;
+      }
+    }
+    else if(! vm.count("lambda2"))
+    {
+      if(grayscale) lambda2 = {1};
+      else          lambda2 = {1, 1, 1};
+    }
+    if(vm.count("eps") && eps < 0)
+    {
+      std::cerr << "\nCannot have negative smoothing parameter: " << eps << ".\n\n";
+      return EXIT_FAILURE;
+    }
+    if(vm.count("tol") && tol < 0)
+    {
+      std::cerr << "\nCannot have negative tolerance: " << tol << ".\n\n";
+      return EXIT_FAILURE;
+    }
+    if(vm.count("max-steps") && max_steps < 0)
+    {
+      std::cerr << "\nNegative maximum nof iterations: " << max_steps << ". "
+                << "Switching to INT_MAX instead.\n\n";
     }
   }
   catch(std::exception & e)
@@ -329,21 +426,25 @@ main(int argc,
               << "(probably not an image)!\n\n";
     return EXIT_FAILURE;
   }
-///-- Second conversion needed if we want to display a colored contour
+
+///-- Second conversion needed since we want to display a colored contour
 ///   on a grayscale image
   cv::Mat img;
   if(grayscale) cv::cvtColor(_img, img, CV_GRAY2RGB);
   else          img = _img;
+  _img.release();
 
 ///-- Determine the constants and define functionals
+  max_steps = max_steps < 0 ? std::numeric_limits<int>::max() : max_steps;
   const int h = img.rows;
   const int w = img.cols;
   const int nof_channels = grayscale ? 1 : img.channels();
   const auto heaviside = std::bind(regularized_heaviside, std::placeholders::_1, eps);
+  const auto delta = std::bind(regularized_delta, std::placeholders::_1, eps);
 
 ///-- Construct the level set
   levelset u;
-  levelset_checkerboard(u, w, h);
+  levelset_checkerboard(u, h, w);
 
 ///-- Split the channels
   std::vector<cv::Mat> channels;
@@ -351,13 +452,33 @@ main(int argc,
   cv::split(img, channels);
   std::vector<double> c1(nof_channels, 0), c2(nof_channels, 0);
 
-///-- Channel loop
+///-- Find intensity sum and derive the stopping condition
+  cv::Mat intensity_avg = cv::Mat(h, w, CV_64FC1, cv::Scalar::all(0));
   for(int k = 0; k < nof_channels; ++k)
   {
+    cv::Mat channel(h, w, intensity_avg.type());
+    channels[k].convertTo(channel, channel.type());
+    intensity_avg += channel;
+  }
+  intensity_avg /= nof_channels;
+  double stop_cond = tol * cv::norm(intensity_avg, cv::NORM_L2);
+  intensity_avg.release();
+
+///-- Timestep loop
+  for(int t = 0; t < max_steps; ++t)
+  {
+///-- Channel loop
+    for(int k = 0; k < nof_channels; ++k)
+    {
+      cv::Mat channel = channels[k];
 ///-- Find the regional variances
-    c1[k] = region_variance(channels[k], u, w, h, Region::Inside, heaviside);
-    c2[k] = region_variance(channels[k], u, w, h, Region::Outside, heaviside);
-    std::cout << k << "\t" << c1[k] << "\t" << c2[k] << "\n";
+      c1[k] = region_variance(channel, u, h, w, Region::Inside, heaviside);
+      c2[k] = region_variance(channel, u, h, w, Region::Outside, heaviside);
+
+///-- Calculate the contribution of one channel to the level set
+      cv::Mat u_ch_contrib(cv::Mat::zeros(h, w, CV_64FC1));
+    }
+///-- Check if we have achieved the desired precision
   }
 
 ///-- Display the zero level set
