@@ -2,9 +2,10 @@
 #include <cstdlib> // EXIT_SUCCESS
 #include <vector> // std::vector<>
 #include <algorithm> // std::min()
-#include <cmath> // std::pow(), std::sqrt(), std::sin()
+#include <cmath> // std::pow(), std::sqrt(), std::sin(), std::atan()
 #include <exception> // std::exception
 #include <string> // std::string
+#include <functional> // std::function<>, std::bind(), std::placeholders::_1
 
 #include <opencv2/imgproc/imgproc.hpp> // cv::cvtColor(), CV_BGR2RGB cv::threshold(),
                                        // cv::findContours(), cv::drawContours(),
@@ -39,8 +40,70 @@
 #pragma clang diagnostic pop
 #endif
 
+/**
+ * @file
+ * @todo add lambda1 and lambda2 as vector arguments
+ */
+
 typedef unsigned char uchar;
 typedef std::vector<std::vector<double>> levelset;
+
+enum Region { Inside, Outside };
+
+/**
+ * @brief Regularized (smoothed) Heaviside step function
+ * @f[ $H_\epsilon(x)=\frac{1}{2}\Big(1+\frac{2}{\pi}\atan\frac{x}{\epsilon}\Big)$ @f]
+ * @param x   Argument of the step function
+ * @param eps Smoothing parameter
+ * @return Value of the step function at x
+ */
+constexpr double
+regularized_heaviside(double x,
+                      double eps = 1)
+{
+  const double pi = boost::math::constants::pi<double>();
+  return (1 + 2 / pi * std::atan(x / eps)) / 2;
+}
+
+/**
+ * @brief Regularized (smoothed) Dirac delta function
+ * @f[ $\delta_\epsilon(x)=\frac{\epsilon}{\pi(\epsilon^2+x^2)}$ @f]
+ * @param x   Argument of the delta function
+ * @param eps Smoothing parameter
+ * @return Value of the delta function at x
+ */
+constexpr double
+regularized_delta(double x,
+                  double eps = 1)
+{
+  const double pi = boost::math::constants::pi<double>();
+  return eps / (pi * (std::pow(eps, 2) + std::pow(x, 2)));
+}
+
+double
+region_variance(const cv::Mat & img,
+                const levelset & u,
+                int w,
+                int h,
+                Region region,
+                std::function<double(double)> heaviside)
+{
+  double nom = 0.0,
+         denom = 0.0;
+  auto H = (region == Region::Inside)
+             ? heaviside
+             : [&heaviside](double x) -> double { return 1 - heaviside(x); };
+  for(int i = 0; i < h; ++i)
+  {
+    for(int j = 0; j < w; ++j)
+    {
+      double h = H(u[i][j]);
+      nom += img.at<uchar>(i, j) * h;
+      denom += h;
+    }
+  }
+  return nom / denom;
+}
 
 /**
  * @brief Creates a level set with rectangular zero level set
@@ -206,11 +269,8 @@ int
 main(int argc,
      char ** argv)
 {
-
-///-- @todo add lambda1 and lambda2 as vector arguments
-
   std::string input_filename;
-  double mu, nu;
+  double mu, nu, eps;
   bool grayscale = false;
   try
   {
@@ -222,6 +282,7 @@ main(int argc,
       ("mu",          po::value<double>(&mu) -> default_value(0.5), "length penalty parameter")
       ("nu",          po::value<double>(&nu) -> default_value(0),   "area penalty parameter")
       ("grayscale,g",                                               "read in as grayscale")
+      ("epsilon,e",   po::value<double>(&eps) -> default_value(1),  "smoothing param in Heaviside/delta")
     ;
     po::variables_map vm;
     po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
@@ -274,10 +335,11 @@ main(int argc,
   if(grayscale) cv::cvtColor(_img, img, CV_GRAY2RGB);
   else          img = _img;
 
-///-- Determine the constants
+///-- Determine the constants and define functionals
   const int h = img.rows;
   const int w = img.cols;
   const int nof_channels = grayscale ? 1 : img.channels();
+  const auto heaviside = std::bind(regularized_heaviside, std::placeholders::_1, eps);
 
 ///-- Construct the level set
   levelset u;
@@ -287,7 +349,16 @@ main(int argc,
   std::vector<cv::Mat> channels;
   channels.reserve(nof_channels);
   cv::split(img, channels);
+  std::vector<double> c1(3, 0), c2(3, 0);
 
+///-- Channel loop
+  for(int k = 0; k < nof_channels; ++k)
+  {
+///-- Find the regional variances
+    c1[k] = region_variance(channels[k], u, w, h, Region::Inside, heaviside);
+    c2[k] = region_variance(channels[k], u, w, h, Region::Outside, heaviside);
+    std::cout << k << "\t" << c1[k] << "\t" << c2[k] << "\n";
+  }
 
 ///-- Display the zero level set
   cv::Mat nw_img = img.clone();
