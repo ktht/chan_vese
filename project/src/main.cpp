@@ -7,15 +7,17 @@
 #include <string> // std::string
 #include <functional> // std::function<>, std::bind(), std::placeholders::_1
 #include <limits> // std::numeric_limits<>
+#include <map> // std::map<>
 
 #include <opencv2/imgproc/imgproc.hpp> // cv::cvtColor(), CV_BGR2RGB cv::threshold(),
                                        // cv::findContours(), cv::drawContours(),
-                                       // cv::THRESH_BINARY, CV_RETR_TREE, CV_CHAIN_APPROX_SIMPLE
+                                       // cv::THRESH_BINARY, CV_RETR_TREE, CV_CHAIN_APPROX_SIMPLE,
+                                       // cv::BORDER_REPLICATE, cv::filter2D()
 #include <opencv2/highgui/highgui.hpp> // cv::imread(), CV_LOAD_IMAGE_COLOR, cv::WINDOW_NORMAL,
                                        // cv::imshow(), cv::waitKey(), cv::namedWindow()
 
                                        // cv::Mat, cv::Scalar, cv::Vec4i, cv::Point, cv::norm(),
-                                       // cv::NORM_L2, CV_64FC1, CV_64FC1
+                                       // cv::NORM_L2, CV_64FC1, CV_64FC1, cv::Mat_<>
 
 #include <boost/math/special_functions/sign.hpp> // boost::math::sign()
 
@@ -144,14 +146,12 @@ region_variance(const cv::Mat & img,
              ? heaviside
              : [&heaviside](double x) -> double { return 1 - heaviside(x); };
   for(int i = 0; i < h; ++i)
-  {
     for(int j = 0; j < w; ++j)
     {
       double h = H(u.at<double>(i, j));
       nom += img.at<uchar>(i, j) * h;
       denom += h;
     }
-  }
   return nom / denom;
 }
 
@@ -320,6 +320,49 @@ variance_penalty(const cv::Mat & channel,
   return channel_term;
 }
 
+cv::Mat
+curvature(const cv::Mat & u,
+          int h,
+          int w,
+          const std::map<std::string, cv::Mat> & kernels)
+{
+  const double eta = 1E-8;
+  const double eta2 = std::pow(eta, 2);
+  cv::Mat upx (h, w, CV_64FC1), upy (h, w, CV_64FC1),
+          ucx2(h, w, CV_64FC1), ucy2(h, w, CV_64FC1),
+          upx2(h, w, CV_64FC1), upy2(h, w, CV_64FC1),
+          nx  (h, w, CV_64FC1), ny  (h, w, CV_64FC1);
+  cv::filter2D(u, upx,  CV_64FC1, kernels.at("fwd_x"), cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
+  cv::filter2D(u, upy,  CV_64FC1, kernels.at("fwd_y"), cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
+  cv::filter2D(u, ucx2, CV_64FC1, kernels.at("ctr_x"), cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
+  cv::filter2D(u, ucy2, CV_64FC1, kernels.at("ctr_y"), cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
+  cv::pow(ucx2, 2, ucx2);
+  cv::pow(ucy2, 2, ucy2);
+  cv::pow(upx,  2, upx2);
+  cv::pow(upy,  2, upy2);
+  cv::sqrt(upx2 + ucy2 + eta2, nx);
+  cv::sqrt(ucx2 + upy2 + eta2, ny);
+  cv::divide(upx, nx, upx);
+  cv::divide(upy, ny, upy);
+  cv::filter2D(upx, upx, CV_64FC1, kernels.at("bwd_x"), cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
+  cv::filter2D(upy, upy, CV_64FC1, kernels.at("bwd_y"), cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
+  upx += upy;
+  return upx;
+}
+
+void
+print_mat(const cv::Mat & m,
+          int x,
+          int y)
+{
+  for(int j = 0; j < y; ++j)
+  {
+    for(int i = 0; i < x; ++i)
+      std::cout << m.at<double>(i, j) << " ";
+    std::cout << "\n";
+  }
+}
+
 int
 main(int argc,
      char ** argv)
@@ -448,8 +491,7 @@ main(int argc,
   else          _img = cv::imread(input_filename, CV_LOAD_IMAGE_COLOR);
   if(! _img.data)
   {
-    std::cerr << "\nError on opening " << input_filename <<" "
-              << "(probably not an image)!\n\n";
+    std::cerr << "\nError on opening " << input_filename << " (probably not an image)!\n\n";
     return EXIT_FAILURE;
   }
 
@@ -467,6 +509,16 @@ main(int argc,
   const int nof_channels = grayscale ? 1 : img.channels();
   const auto heaviside = std::bind(regularized_heaviside, std::placeholders::_1, eps);
   const auto delta = std::bind(regularized_delta, std::placeholders::_1, eps);
+
+///-- Define kernels for forward, backward and central differences in x and y direction
+  const std::map<std::string, cv::Mat> kernels = {
+    { "fwd_x", (cv::Mat_<double>(3, 3) << 0,   0,0,   0,-1,  1,0,  0,0) },
+    { "fwd_y", (cv::Mat_<double>(3, 3) << 0,   0,0,   0,-1,  0,0,  1,0) },
+    { "bwd_x", (cv::Mat_<double>(3, 3) << 0,   0,0,  -1, 1,  0,0,  0,0) },
+    { "bwd_y", (cv::Mat_<double>(3, 3) << 0,  -1,0,   0, 1,  0,0,  0,0) },
+    { "ctr_x", (cv::Mat_<double>(3, 3) << 0,   0,0,-0.5, 0,0.5,0,  0,0) },
+    { "ctr_y", (cv::Mat_<double>(3, 3) << 0,-0.5,0,   0, 0,  0,0,0.5,0) },
+  };
 
 ///-- Construct the level set
   cv::Mat u = levelset_checkerboard(h, w);
@@ -501,16 +553,23 @@ main(int argc,
       const double c2 = region_variance(channel, u, h, w, Region::Outside, heaviside);
 
 ///-- Calculate the contribution of one channel to the level set
-      cv::Mat variance_inside = variance_penalty(channel, h, w, c1, lambda1[k]);
-      cv::Mat variance_outside = variance_penalty(channel, h, w, c2, lambda2[k]);
+      const cv::Mat variance_inside = variance_penalty(channel, h, w, c1, lambda1[k]);
+      const cv::Mat variance_outside = variance_penalty(channel, h, w, c2, lambda2[k]);
       u_diff += -variance_inside + variance_outside;
     }
     u_diff /= nof_channels;
-    // add divergence
+    u_diff -= nu;
+///-- Calculate the curvature (divergence of normalized gradient)
+    const cv::Mat kappa = curvature(u, h, w, kernels);
+    kappa *= mu;
+    u_diff += kappa;
+    u_diff *= dt;
+
 ///-- Check if we have achieved the desired precision
   }
 
 ///-- Display the zero level set
+/*
   cv::Mat nw_img = img.clone();
   draw_contour(nw_img, u);
   cv::namedWindow("Display window", cv::WINDOW_NORMAL);
@@ -518,6 +577,6 @@ main(int argc,
   cv::waitKey(1000);
   cv::imshow("Display window", nw_img);
   cv::waitKey(0);
-
+*/
   return EXIT_SUCCESS;
 }
