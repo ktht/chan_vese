@@ -50,6 +50,7 @@
 
 /**
  * @file
+ * @todo Switch from levelset (aka std::vector<std::vector<double>>) to cv::Mat of type CV_64FC1
  */
 
 typedef unsigned char uchar;
@@ -109,6 +110,26 @@ regularized_delta(double x,
   return eps / (pi * (std::pow(eps, 2) + std::pow(x, 2)));
 }
 
+/**
+ * @brief Calculates average regional variance
+ * @f[ $c_i = \frac{\int_\Omega I_i(x,y)g(u(x,y))\mathrm{d}x\mathrm{d}y}{
+                    \int_\Omega g(u(x,y))\mathrm{d}x\mathrm{d}y}$ @f],
+ * where @f[ $u(x,y)$ @f] is the level set function,
+ * @f[ $I_i$ @f] is the @f[ $i$ @f]-th channel in the image and
+ * @f[ $g$ @f] is either the Heaviside function @f[$H(x)$@f]
+ * (for region encolosed by the contour) or @f[$1-H(x)$@f] (for region outside
+ * the contour).
+ * @param img       Input image (channel), @f[ $I_i(x,y)$ @f]
+ * @param u         Level set, @f[ $u(x,y)$ @f]
+ * @param h         Height of the image
+ * @param w         Width of the image
+ * @param region    Region either inside or outside the contour
+ * @param heaviside Heaviside function, @f[ $H(x)$ @f]
+ *                  One might also try different regularized heaviside functions
+ *                  or even a non-smoothed one; that's why we've left it as a parameter
+ * @return          Average variance of the given region in the image
+ * @sa variance_penalty
+ */
 double
 region_variance(const cv::Mat & img,
                 const levelset & u,
@@ -294,6 +315,37 @@ draw_contour(cv::Mat & dst,
   return 0;
 }
 
+/**
+ * @brief Calculates variance penalty matrix,
+ * @f[ $\lambda_i\int_\Omega|I_i(x,y)-c_i|^2 g(u(x,y))\mathrm{d}x\mathrm{d}y$ @f],
+ * where @f[ $u(x,y)$ @f] is the level set function,
+ * @f[ $I_i$ @f] is the @f[ $i$ @f]-th channel in the image and
+ * @f[ $g$ @f] is either the Heaviside function @f[$H(x)$@f]
+ * (for region encolosed by the contour) or @f[$1-H(x)$@f] (for region outside
+ * the contour).
+ * @param channel Channel of the input image, @f[ $I_i(x,y)$ @f]
+ * @param h       Height of the image
+ * @param w       Width of the image
+ * @param c       Variance of particular region in the image, @f[ $c_i$ @f]
+ * @param lambda  Penalty parameter, @f[ $\lambda_i$ @f]
+ * @return Variance penalty matrix
+ * @sa region_variance
+ */
+cv::Mat
+variance_penalty(const cv::Mat & channel,
+                 int h,
+                 int w,
+                 double c,
+                 double lambda)
+{
+  cv::Mat channel_term(cv::Mat::zeros(h, w, CV_64FC1));
+  channel.convertTo(channel_term, channel_term.type());
+  channel_term -= c;
+  cv::pow(channel_term, 2, channel_term);
+  channel_term *= lambda;
+  return channel_term;
+}
+
 int
 main(int argc,
      char ** argv)
@@ -450,7 +502,6 @@ main(int argc,
   std::vector<cv::Mat> channels;
   channels.reserve(nof_channels);
   cv::split(img, channels);
-  std::vector<double> c1(nof_channels, 0), c2(nof_channels, 0);
 
 ///-- Find intensity sum and derive the stopping condition
   cv::Mat intensity_avg = cv::Mat(h, w, CV_64FC1, cv::Scalar::all(0));
@@ -468,16 +519,20 @@ main(int argc,
   for(int t = 0; t < max_steps; ++t)
   {
 ///-- Channel loop
+    cv::Mat u_diff(cv::Mat::zeros(h, w, CV_64FC1));
     for(int k = 0; k < nof_channels; ++k)
     {
       cv::Mat channel = channels[k];
-///-- Find the regional variances
-      c1[k] = region_variance(channel, u, h, w, Region::Inside, heaviside);
-      c2[k] = region_variance(channel, u, h, w, Region::Outside, heaviside);
+///-- Find the average regional variances
+      const double c1 = region_variance(channel, u, h, w, Region::Inside, heaviside);
+      const double c2 = region_variance(channel, u, h, w, Region::Outside, heaviside);
 
 ///-- Calculate the contribution of one channel to the level set
-      cv::Mat u_ch_contrib(cv::Mat::zeros(h, w, CV_64FC1));
+      cv::Mat variance_inside = variance_penalty(channel, h, w, c1, lambda1[k]);
+      cv::Mat variance_outside = variance_penalty(channel, h, w, c2, lambda2[k]);
+      u_diff += -variance_inside + variance_outside;
     }
+    u_diff /= nof_channels;
 ///-- Check if we have achieved the desired precision
   }
 
