@@ -349,7 +349,7 @@ main(int argc,
   std::vector<cv::Mat> channels;
   channels.reserve(nof_channels);
   cv::split(img, channels);
-  std::vector<double> c1(3, 0), c2(3, 0);
+  std::vector<double> c1(nof_channels, 0), c2(nof_channels, 0);
 
 ///-- Channel loop
   for(int k = 0; k < nof_channels; ++k)
