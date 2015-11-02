@@ -4,7 +4,7 @@
 #include <algorithm> // std::min()
 #include <cmath> // std::pow(), std::sqrt(), std::sin(), std::atan()
 #include <exception> // std::exception
-#include <string> // std::string
+#include <string> // std::string, std::to_string()
 #include <functional> // std::function<>, std::bind(), std::placeholders::_1
 #include <limits> // std::numeric_limits<>
 #include <map> // std::map<>
@@ -17,7 +17,7 @@
                                        // cv::imshow(), cv::waitKey(), cv::namedWindow()
 
                                        // cv::Mat, cv::Scalar, cv::Vec4i, cv::Point, cv::norm(),
-                                       // cv::NORM_L2, CV_64FC1, CV_64FC1, cv::Mat_<>
+                                       // cv::NORM_L2, CV_64FC1, CV_64FC1, cv::Mat_<>, ParallelLoopBody
 
 #include <boost/math/special_functions/sign.hpp> // boost::math::sign()
 #include <boost/algorithm/string/predicate.hpp> // boost::iequals()
@@ -54,18 +54,13 @@
 
 /**
  * @file
- * @todo Add option to specify the initial contour from command line
- * @todo See what Sobel kernel does with the image (or come up with a better kernel)
+ * @todo add an option to specify the initial contour from command line OR
+         add capability to set the contour by clicking twice on the image (rectangle/circle)
  * @todo figure out how to parallelize convolution (it has to be possible if the input
  *       and output images are different)
- * @todo object selection as a video (showing contour progress)?
  * @todo write a cute readme
  * @todo print progress (e.g. average variances, L2 norm of differential level set etc)
- * @todo line color from command line
- * @todo add color list
  * @todo Doxyfile
- * @todo add capability to set the contour by clicking twice on the image (rectangle/circle)
- * @todo oh, and reinitialization; add interval parameter
  */
 
 typedef unsigned char uchar;
@@ -85,6 +80,24 @@ enum Region { Inside, Outside };
 enum TextPosition { TopLeft, TopRight, BottomLeft, BottomRight };
 
 /**
+ * @brief The Colors struct
+ */
+struct Colors
+{
+  static const cv::Scalar white;
+  static const cv::Scalar black;
+  static const cv::Scalar red;
+  static const cv::Scalar green;
+  static const cv::Scalar blue;
+};
+
+const cv::Scalar Colors::white = CV_RGB(255, 255, 255);
+const cv::Scalar Colors::black = CV_RGB(  0,   0,   0);
+const cv::Scalar Colors::red   = CV_RGB(255,   0,   0);
+const cv::Scalar Colors::green = CV_RGB(  0, 255,   0);
+const cv::Scalar Colors::blue  = CV_RGB(  0,   0, 255);
+
+/**
  * @brief Struct for holding basic parameters of a font
  */
 struct FontParameters
@@ -93,12 +106,12 @@ struct FontParameters
                  double font_scale,
                  int font_thickness,
                  int font_linetype,
-                 int baseline)
+                 int font_baseline)
     : face(font_face)
     , scale(font_scale)
     , thickness(font_thickness)
     , type(font_linetype)
-    , baseline(baseline)
+    , baseline(font_baseline)
   {}
   const int face;
   const double scale;
@@ -353,7 +366,8 @@ levelset2contour(const cv::Mat & u)
  */
 int
 draw_contour(cv::Mat & dst,
-             const cv::Mat & u)
+             const cv::Mat & u,
+             const cv::Scalar & line_color)
 {
   cv::Mat th;
   std::vector<std::vector<cv::Point>> cs;
@@ -366,8 +380,7 @@ draw_contour(cv::Mat & dst,
   int idx = 0;
   for(; idx >= 0; idx = hier[idx][0])
   {
-    cv::Scalar color(255, 0, 0); // blue
-    cv::drawContours(dst, cs, idx, color, 1, 8, hier);
+    cv::drawContours(dst, cs, idx, line_color, 1, 8, hier);
   }
 
   return 0;
@@ -468,8 +481,7 @@ overlay_color(const cv::Mat & img,
               cv::Scalar & color,
               cv::Point & p)
 {
-  const cv::Scalar white = CV_RGB(255, 255, 255);
-  const cv::Scalar black = CV_RGB(  0,   0,   0);
+
   const int threshold = 105; // bias towards black font
 
   const cv::Size txt_sz = cv::getTextSize(txt, fparam.face, fparam.scale, fparam.thickness, &fparam.baseline);
@@ -499,7 +511,7 @@ overlay_color(const cv::Mat & img,
 
   cv::Scalar avgs = cv::mean(img(cv::Rect(q, txt_sz)));
   const double intensity_avg = 0.114*avgs[0] + 0.587*avgs[1] + 0.299*avgs[2];
-  color = 255 - intensity_avg < threshold ? black : white;
+  color = 255 - intensity_avg < threshold ? Colors::black : Colors::white;
   return 0;
 }
 
@@ -547,23 +559,37 @@ separate(const cv::Mat & img,
   return selection;
 }
 
+/**
+ * @brief Displays error message surrounded by newlines and exits.
+ * @param msg Message to display.
+*/
+[[ noreturn ]] void
+msg_exit(const std::string & msg)
+{
+  std::cerr << "\n" << msg << "\n\n";
+  std::exit(EXIT_FAILURE);
+}
+
 int
 main(int argc,
      char ** argv)
 {
   double mu, nu, eps, tol, dt, fps;
-  int max_steps;
+  int max_steps,
+      reinit_interval;
   std::vector<double> lambda1,
                       lambda2;
   std::string input_filename,
-              text_position;
-  TextPosition pos = TextPosition::TopLeft;
+              text_position,
+              line_color_str;
   bool grayscale        = false,
        write_video      = false,
        overlay_text     = false,
        object_selection = false,
        invert           = false,
        verbose          = false;
+  TextPosition pos = TextPosition::TopLeft;
+  cv::Scalar contour_color = Colors::blue;
 
 ///-- Parse command line arguments
 ///   Negative values in multitoken are not an issue, b/c it doesn't make much sense
@@ -573,24 +599,26 @@ main(int argc,
     namespace po = boost::program_options;
     po::options_description desc("Allowed options", get_terminal_width());
     desc.add_options()
-      ("help,h",                                                                        "this message")
-      ("input,i",            po::value<std::string>(&input_filename),                       "input image")
-      ("mu",                 po::value<double>(&mu) -> default_value(0.5),                  "length penalty parameter")
-      ("nu",                 po::value<double>(&nu) -> default_value(0),                    "area penalty parameter")
-      ("dt",                 po::value<double>(&dt) -> default_value(1),                    "timestep")
-      ("lambda1",            po::value<std::vector<double>>(&lambda1) -> multitoken(),      "penalty of variance inside the contour (default: 1's)")
-      ("lambda2",            po::value<std::vector<double>>(&lambda2) -> multitoken(),      "penalty of variance outside the contour (default: 1's)")
-      ("epsilon,e",          po::value<double>(&eps) -> default_value(1),                   "smoothing parameter in Heaviside/delta")
-      ("tolerance,t",        po::value<double>(&tol) -> default_value(0.001),               "tolerance in stopping condition")
-      ("max-steps,N",        po::value<int>(&max_steps) -> default_value(-1),               "maximum nof iterations (negative means unlimited)")
-      ("fps,f",              po::value<double>(&fps) -> default_value(10),                  "video fps")
-      ("overlay-pos,P",      po::value<std::string>(&text_position) -> default_value("TL"), "overlay tex position; allowed only: TL, BL, TR, BR")
-      ("verbose,v",          po::bool_switch(&verbose),                                     "verbose mode")
-      ("grayscale,g",        po::bool_switch(&grayscale),                                   "read in as grayscale")
-      ("video,V",            po::bool_switch(&write_video),                                 "enable video output (changes the extension to .avi)")
-      ("overlay-text,O",     po::bool_switch(&overlay_text),                                "add overlay text")
-      ("invert-selection,I", po::bool_switch(&invert),                                      "invert selected region (see: select)")
-      ("select,s",           po::bool_switch(&object_selection),                            "separate the region encolosed by the contour (adds suffix _selection)")
+      ("help,h",                                                                               "this message")
+      ("input,i",            po::value<std::string>(&input_filename),                          "input image")
+      ("mu",                 po::value<double>(&mu) -> default_value(0.5),                     "length penalty parameter")
+      ("nu",                 po::value<double>(&nu) -> default_value(0),                       "area penalty parameter")
+      ("dt",                 po::value<double>(&dt) -> default_value(1),                       "timestep")
+      ("reinit-interval,r",  po::value<int>(&reinit_interval) -> default_value(-1),            "reinitialization interval (it also enables reinitialization")
+      ("lambda1",            po::value<std::vector<double>>(&lambda1) -> multitoken(),         "penalty of variance inside the contour (default: 1's)")
+      ("lambda2",            po::value<std::vector<double>>(&lambda2) -> multitoken(),         "penalty of variance outside the contour (default: 1's)")
+      ("epsilon,e",          po::value<double>(&eps) -> default_value(1),                      "smoothing parameter in Heaviside/delta")
+      ("tolerance,t",        po::value<double>(&tol) -> default_value(0.001),                  "tolerance in stopping condition")
+      ("max-steps,N",        po::value<int>(&max_steps) -> default_value(-1),                  "maximum nof iterations (negative means unlimited)")
+      ("fps,f",              po::value<double>(&fps) -> default_value(10),                     "video fps")
+      ("overlay-pos,P",      po::value<std::string>(&text_position) -> default_value("TL"),    "overlay tex position; allowed only: TL, BL, TR, BR")
+      ("line-color,l",       po::value<std::string>(&line_color_str) -> default_value("blue"), "contour color (allowed only: red, green, blue, black, white)")
+      ("verbose,v",          po::bool_switch(&verbose),                                        "verbose mode")
+      ("grayscale,g",        po::bool_switch(&grayscale),                                      "read in as grayscale")
+      ("video,V",            po::bool_switch(&write_video),                                    "enable video output (changes the extension to '.avi')")
+      ("overlay-text,O",     po::bool_switch(&overlay_text),                                   "add overlay text")
+      ("invert-selection,I", po::bool_switch(&invert),                                         "invert selected region (see: select)")
+      ("select,s",           po::bool_switch(&object_selection),                               "separate the region encolosed by the contour (adds suffix '_selection')")
     ;
     po::variables_map vm;
     po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
@@ -602,37 +630,23 @@ main(int argc,
       return EXIT_SUCCESS;
     }
     if(! vm.count("input"))
-    {
-      std::cerr << "\nError: you have to specify input file name!\n\n";
-      return EXIT_FAILURE;
-    }
+      msg_exit("Error: you have to specify input file name!");
     else if(vm.count("input") && ! boost::filesystem::exists(input_filename))
-    {
-      std::cerr << "\nError: file \"" << input_filename << "\" does not exists!\n\n";
-      return EXIT_FAILURE;
-    }
-    if(vm.count("dt") && dt < 0)
-    {
-      std::cerr << "\nCannot have negative timestep: " << dt << ".\n\n";
-      return EXIT_FAILURE;
-    }
+      msg_exit("Error: file \"" + input_filename + "\" does not exists!");
+    if(vm.count("dt") && dt <= 0)
+      msg_exit("Cannot have negative or zero timestep: " + std::to_string(dt) + ".");
+    if(vm.count("reinit-interval") && reinit_interval <= 0)
+      msg_exit("Reinitialization interval must be positive.");
     if(vm.count("lambda1"))
     {
       if(grayscale && lambda1.size() != 1)
-      {
-        std::cerr << "\nToo many lambda1 values for a grayscale image.\n\n";
-        return EXIT_FAILURE;
-      }
-      else if(!grayscale && lambda1.size() != 3)
-      {
-        std::cerr << "\nNumber of lambda1 values must be 3 for a colored input image.\n\n";
-        return EXIT_FAILURE;
-      }
-      if(grayscale && lambda1.size() == 1 && lambda1[0] < 0)
-      {
-        std::cerr << "\nThe value of lambda1 cannot be negative.\n\n";
-        return EXIT_FAILURE;
-      }
+        msg_exit("Too many lambda1 values for a grayscale image.");
+      else if(! grayscale && lambda1.size() != 3)
+        msg_exit("Number of lambda1 values must be 3 for a colored input image.");
+      else if(grayscale && lambda1[0] < 0)
+        msg_exit("The value of lambda1 cannot be negative.");
+      else if(! grayscale && (lambda1[0] < 0 || lambda1[1] < 0 || lambda1[2] < 0))
+        msg_exit("Any value of lambda1 cannot be negative.");
     }
     else if(! vm.count("lambda1"))
     {
@@ -642,20 +656,13 @@ main(int argc,
     if(vm.count("lambda2"))
     {
       if(grayscale && lambda2.size() != 1)
-      {
-        std::cerr << "\nToo many lambda2 values for a grayscale image.\n\n";
-        return EXIT_FAILURE;
-      }
-      else if(!grayscale && lambda2.size() != 3)
-      {
-        std::cerr << "\nNumber of lambda2 values must be 3 for a colored input image.\n\n";
-        return EXIT_FAILURE;
-      }
-      if(grayscale && lambda2.size() == 1 && lambda2[0] < 0)
-      {
-        std::cerr << "\nThe value of lambda1 cannot be negative.\n\n";
-        return EXIT_FAILURE;
-      }
+        msg_exit("Too many lambda2 values for a grayscale image.");
+      else if(! grayscale && lambda2.size() != 3)
+        msg_exit("Number of lambda2 values must be 3 for a colored input image.");
+      else if(grayscale && lambda2[0] < 0)
+        msg_exit("The value of lambda2 cannot be negative.");
+      else if(! grayscale && (lambda2[0] < 0 || lambda2[1] < 0 || lambda2[2] < 0))
+        msg_exit("Any value of lambda2 cannot be negative.");
     }
     else if(! vm.count("lambda2"))
     {
@@ -663,15 +670,9 @@ main(int argc,
       else          lambda2 = {1, 1, 1};
     }
     if(vm.count("eps") && eps < 0)
-    {
-      std::cerr << "\nCannot have negative smoothing parameter: " << eps << ".\n\n";
-      return EXIT_FAILURE;
-    }
+      msg_exit("Cannot have negative smoothing parameter: " + std::to_string(eps) + ".");
     if(vm.count("tol") && tol < 0)
-    {
-      std::cerr << "\nCannot have negative tolerance: " << tol << ".\n\n";
-      return EXIT_FAILURE;
-    }
+      msg_exit("Cannot have negative tolerance: " + std::to_string(tol) + ".");
     if(vm.count("overlay-pos"))
     {
       if     (boost::iequals(text_position, "TL")) pos = TextPosition::TopLeft;
@@ -679,20 +680,28 @@ main(int argc,
       else if(boost::iequals(text_position, "TR")) pos = TextPosition::TopRight;
       else if(boost::iequals(text_position, "BR")) pos = TextPosition::BottomRight;
       else
-      {
-        std::cerr << "\nInvalid text position requested.\n"
-                  << "Correct values are: TL -- top left\n"
-                  << "                    BL -- bottom left\n"
-                  << "                    TR -- top right\n"
-                  << "                    BR -- bottom right\n\n";
-        return EXIT_FAILURE;
-      }
+        msg_exit("Invalid text position requested.\n"\
+                 "Correct values are: TL -- top left\n"\
+                 "                    BL -- bottom left\n"\
+                 "                    TR -- top right\n"\
+                 "                    BR -- bottom right"\
+                );
+    }
+    if(vm.count("line-color"))
+    {
+      if     (boost::iequals(line_color_str, "red"))   contour_color = Colors::red;
+      else if(boost::iequals(line_color_str, "green")) contour_color = Colors::green;
+      else if(boost::iequals(line_color_str, "blue"))  contour_color = Colors::blue;
+      else if(boost::iequals(line_color_str, "black")) contour_color = Colors::black;
+      else if(boost::iequals(line_color_str, "white")) contour_color = Colors::white;
+      else
+        msg_exit("Invalid contour color requested.\n"\
+                 "Correct values are: red, green, blue, black, white.");
     }
   }
   catch(std::exception & e)
   {
-    std::cerr << "error: " << e.what() << "n";
-    return EXIT_FAILURE;
+    msg_exit("error: " + std::string(e.what()));
   }
 
 ///-- Read the image (grayscale or BGR? RGB? BGR? help)
@@ -700,13 +709,9 @@ main(int argc,
   if(grayscale) _img = cv::imread(input_filename, CV_LOAD_IMAGE_GRAYSCALE);
   else          _img = cv::imread(input_filename, CV_LOAD_IMAGE_COLOR);
   if(! _img.data)
-  {
-    std::cerr << "\nError on opening " << input_filename << " (probably not an image)!\n\n";
-    return EXIT_FAILURE;
-  }
+    msg_exit("Error on opening \"" + input_filename + "\" (probably not an image)!");
 
-///-- Second conversion needed since we want to display a colored contour
-///   on a grayscale image
+///-- Second conversion needed since we want to display a colored contour on a grayscale image
   cv::Mat img;
   if(grayscale) cv::cvtColor(_img, img, CV_GRAY2RGB);
   else          img = _img;
@@ -801,7 +806,7 @@ main(int argc,
     if(write_video)
     {
       cv::Mat nw_img = img.clone();
-      draw_contour(nw_img, u);
+      draw_contour(nw_img, u, contour_color);
       if(overlay_text)
       {
         const std::string txt = "time = " + std::to_string(t);
@@ -818,6 +823,10 @@ main(int argc,
     if(u_diff_norm <= stop_cond) break;
 
 ///-- Reinitialize the contour
+    if( t + 1 % reinit_interval)
+    {
+      // implement me
+    }
   }
 
 ///-- Select the region enclosed by the contour and save it to the disk
