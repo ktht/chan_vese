@@ -20,6 +20,7 @@
                                        // cv::NORM_L2, CV_64FC1, CV_64FC1, cv::Mat_<>
 
 #include <boost/math/special_functions/sign.hpp> // boost::math::sign()
+#include <boost/algorithm/string/predicate.hpp> // boost::iequals()
 
 #if defined(__gnu_linux__)
 #pragma GCC diagnostic push
@@ -58,8 +59,11 @@
  * @todo figure out how to parallelize convolution (it has to be possible if the input
  *       and output images are different)
  * @todo pixel selection, dump it
- * @todo overlay text
  * @todo write a cute readme
+ * @todo print progress (e.g. average variances, L2 norm of differential level set etc)
+ * @todo line color from command line
+ * @todo add color list
+ * @todo add capability to set the contour by clicking twice on the image (rectangle/circle)
  * @todo oh, and reinitialization; add interval parameter
  */
 
@@ -72,6 +76,35 @@ typedef std::vector<std::vector<double>> levelset;
  * @sa region_variance
  */
 enum Region { Inside, Outside };
+
+/**
+ * @brief Enum for specifying overlay text in the image
+ * @sa overlay_color
+ */
+enum TextPosition { TopLeft, TopRight, BottomLeft, BottomRight };
+
+/**
+ * @brief Struct for holding basic parameters of a font
+ */
+struct FontParameters
+{
+  FontParameters(int font_face,
+                 double font_scale,
+                 int font_thickness,
+                 int font_linetype,
+                 int baseline)
+    : face(font_face)
+    , scale(font_scale)
+    , thickness(font_thickness)
+    , type(font_linetype)
+    , baseline(baseline)
+  {}
+  const int face;
+  const double scale;
+  const int thickness;
+  const int type;
+  int baseline;
+};
 
 /**
  * @brief Class for calculating function values on the level set in parallel.
@@ -411,17 +444,78 @@ curvature(const cv::Mat & u,
   return upx;
 }
 
+/**
+ * @brief Finds proper font color for overlay text
+ *        The color is determined by the average intensity of the ROI where
+ *        the text is placed
+ * @param img    Image where the text is placed
+ * @param txt    The text itself
+ * @param pos    Position in the image (for possibilities: top left corner,
+ *               top right, bottom left or bottom right)
+ * @param fparam Font parameters that help to determine the dimensions of ROI
+ * @param color  Reference to the color variable
+ * @param p      Reference to the bottom left point of the text area
+ * @return Black color, if the background is white enough; otherwise white color
+ * @todo add some check if the text width/height exceeds image dimensions
+ * @sa TextPosition, FontParameters
+ */
+int
+overlay_color(const cv::Mat & img,
+              const std::string txt,
+              TextPosition pos,
+              FontParameters & fparam,
+              cv::Scalar & color,
+              cv::Point & p)
+{
+  const cv::Scalar white = CV_RGB(255, 255, 255);
+  const cv::Scalar black = CV_RGB(  0,   0,   0);
+  const int threshold = 105; // bias towards black font
+
+  const cv::Size txt_sz = cv::getTextSize(txt, fparam.face, fparam.scale, fparam.thickness, &fparam.baseline);
+  const int padding = 5;
+  cv::Point q;
+
+  if(pos == TextPosition::TopLeft)
+  {
+    p = cv::Point(padding, padding + txt_sz.height);
+    q = cv::Point(padding, padding);
+  }
+  else if(pos == TextPosition::TopRight)
+  {
+    p = cv::Point(img.cols - padding - txt_sz.width, padding + txt_sz.height);
+    q = cv::Point(img.cols - padding - txt_sz.width, padding);
+  }
+  else if(pos == TextPosition::BottomLeft)
+  {
+    p = cv::Point(padding, img.rows - padding);
+    q = cv::Point(padding, img.rows - padding - txt_sz.height);
+  }
+  else if(pos == TextPosition::BottomRight)
+  {
+    p = cv::Point(img.cols - padding - txt_sz.width, img.rows - padding);
+    q = cv::Point(img.cols - padding - txt_sz.width, img.rows - padding - txt_sz.height);
+  }
+
+  cv::Scalar avgs = cv::mean(img(cv::Rect(q, txt_sz)));
+  const double intensity_avg = 0.114*avgs[0] + 0.587*avgs[1] + 0.299*avgs[2];
+  color = 255 - intensity_avg < threshold ? black : white;
+  return 0;
+}
+
 int
 main(int argc,
      char ** argv)
 {
-  std::string input_filename,
-              wtitle;
+  std::string input_filename;
   double mu, nu, eps, tol, dt, fps;
   int max_steps;
   std::vector<double> lambda1, lambda2;
+  std::string text_position;
+  TextPosition pos = TextPosition::TopLeft;
   bool grayscale = false,
-       write_video = false;
+       write_video = false,
+       overlay_text = false,
+       verbose = false;
 
 ///-- Parse command line arguments
 ///   Negative values in multitoken are not an issue, b/c it doesn't make much sense
@@ -431,20 +525,22 @@ main(int argc,
     namespace po = boost::program_options;
     po::options_description desc("Allowed options", get_terminal_width());
     desc.add_options()
-      ("help,h",                                                                 "this message")
-      ("input,i",     po::value<std::string>(&input_filename),                   "input image")
-      ("mu",          po::value<double>(&mu) -> default_value(0.5),              "length penalty parameter")
-      ("nu",          po::value<double>(&nu) -> default_value(0),                "area penalty parameter")
-      ("dt",          po::value<double>(&dt) -> default_value(1),                "timestep")
-      ("lambda1",     po::value<std::vector<double>>(&lambda1) -> multitoken(),  "penalty of variance inside the contour (default: 1's)")
-      ("lambda2",     po::value<std::vector<double>>(&lambda2) -> multitoken(),  "penalty of variance outside the contour (default: 1's)")
-      ("epsilon,e",   po::value<double>(&eps) -> default_value(1),               "smoothing param in Heaviside/delta")
-      ("tolerance,t", po::value<double>(&tol) -> default_value(0.001),           "tolerance in stopping condition")
-      ("max-steps,N", po::value<int>(&max_steps) -> default_value(-1),           "maximum nof iterations (negative means unlimited)")
-      ("title,T",     po::value<std::string>(&wtitle) -> default_value("Title"), "title of the window")
-      ("fps,f",       po::value<double>(&fps) -> default_value(10),              "video fps")
-      ("grayscale,g", po::bool_switch(&grayscale),                               "read in as grayscale")
-      ("video,V",     po::bool_switch(&write_video),                             "enable video output (changes the extension to .avi)")
+      ("help,h",                                                                        "this message")
+      ("input,i",        po::value<std::string>(&input_filename),                       "input image")
+      ("mu",             po::value<double>(&mu) -> default_value(0.5),                  "length penalty parameter")
+      ("nu",             po::value<double>(&nu) -> default_value(0),                    "area penalty parameter")
+      ("dt",             po::value<double>(&dt) -> default_value(1),                    "timestep")
+      ("lambda1",        po::value<std::vector<double>>(&lambda1) -> multitoken(),      "penalty of variance inside the contour (default: 1's)")
+      ("lambda2",        po::value<std::vector<double>>(&lambda2) -> multitoken(),      "penalty of variance outside the contour (default: 1's)")
+      ("epsilon,e",      po::value<double>(&eps) -> default_value(1),                   "smoothing parameter in Heaviside/delta")
+      ("tolerance,t",    po::value<double>(&tol) -> default_value(0.001),               "tolerance in stopping condition")
+      ("max-steps,N",    po::value<int>(&max_steps) -> default_value(-1),               "maximum nof iterations (negative means unlimited)")
+      ("fps,f",          po::value<double>(&fps) -> default_value(10),                  "video fps")
+      ("overlay-pos,P",  po::value<std::string>(&text_position) -> default_value("TL"), "overlay tex position; allowed only: TL, BL, TR, BR")
+      ("verbose,v",      po::bool_switch(&verbose),                                     "verbose mode")
+      ("grayscale,g",    po::bool_switch(&grayscale),                                   "read in as grayscale")
+      ("video,V",        po::bool_switch(&write_video),                                 "enable video output (changes the extension to .avi)")
+      ("overlay-text,O", po::bool_switch(&overlay_text),                                "add overlay text")
     ;
     po::variables_map vm;
     po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
@@ -526,6 +622,22 @@ main(int argc,
       std::cerr << "\nCannot have negative tolerance: " << tol << ".\n\n";
       return EXIT_FAILURE;
     }
+    if(vm.count("overlay-pos"))
+    {
+      if     (boost::iequals(text_position, "TL")) pos = TextPosition::TopLeft;
+      else if(boost::iequals(text_position, "BL")) pos = TextPosition::BottomLeft;
+      else if(boost::iequals(text_position, "TR")) pos = TextPosition::TopRight;
+      else if(boost::iequals(text_position, "BR")) pos = TextPosition::BottomRight;
+      else
+      {
+        std::cerr << "\nInvalid text position requested.\n"
+                  << "Correct values are: TL -- top left\n"
+                  << "                    BL -- bottom left\n"
+                  << "                    TR -- top right\n"
+                  << "                    BR -- bottom right\n\n";
+        return EXIT_FAILURE;
+      }
+    }
   }
   catch(std::exception & e)
   {
@@ -557,6 +669,9 @@ main(int argc,
   const int nof_channels = grayscale ? 1 : img.channels();
   const auto heaviside = std::bind(regularized_heaviside, std::placeholders::_1, eps);
   const auto delta = std::bind(regularized_delta, std::placeholders::_1, eps);
+
+///-- Set up overlay font
+  FontParameters fparam(CV_FONT_HERSHEY_PLAIN, 0.8, 1, 0, CV_AA);
 
 ///-- Set up the video writer
   cv::VideoWriter vw;
@@ -637,6 +752,14 @@ main(int argc,
     {
       cv::Mat nw_img = img.clone();
       draw_contour(nw_img, u);
+      if(overlay_text)
+      {
+        const std::string txt = "time = " + std::to_string(t);
+        cv::Scalar color;
+        cv::Point p;
+        overlay_color(img, txt, pos, fparam, color, p);
+        cv::putText(nw_img, txt, p, fparam.face, fparam.scale, color, fparam.thickness, fparam.type);
+      }
       vw.write(nw_img);
     }
 
@@ -644,13 +767,6 @@ main(int argc,
     const double u_diff_norm = cv::norm(u_diff, cv::NORM_L2);
     if(u_diff_norm <= stop_cond) break;
   }
-
-///-- Display the zero level set
-  cv::Mat nw_img = img.clone();
-  draw_contour(nw_img, u);
-  cv::namedWindow(wtitle, cv::WINDOW_NORMAL);
-  cv::imshow(wtitle, nw_img);
-  cv::waitKey(0);
 
   return EXIT_SUCCESS;
 }
