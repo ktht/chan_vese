@@ -4,7 +4,7 @@ CXXFLAGS  += $(WFLAGS) -std=c++14
 LDFLAGS    = -flto -fuse-linker-plugin
 
 ifdef DEBUG
-  CXXFLAGS += -D_GLIBCXX_DEBUG -O0 -g3 -ggdb3
+  CXXFLAGS += -O0 -g3 -ggdb3
 else
   CXXFLAGS += -O3 -g0 -ggdb0 -fno-unsafe-math-optimizations -fno-associative-math
   LDFLAGS  += -s

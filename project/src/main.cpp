@@ -58,11 +58,12 @@
  * @todo See what Sobel kernel does with the image (or come up with a better kernel)
  * @todo figure out how to parallelize convolution (it has to be possible if the input
  *       and output images are different)
- * @todo pixel selection, dump it
+ * @todo object selection as a video (showing contour progress)?
  * @todo write a cute readme
  * @todo print progress (e.g. average variances, L2 norm of differential level set etc)
  * @todo line color from command line
  * @todo add color list
+ * @todo Doxyfile
  * @todo add capability to set the contour by clicking twice on the image (rectangle/circle)
  * @todo oh, and reinitialization; add interval parameter
  */
@@ -448,7 +449,7 @@ curvature(const cv::Mat & u,
  * @brief Finds proper font color for overlay text
  *        The color is determined by the average intensity of the ROI where
  *        the text is placed
- * @param img    Image where the text is placed
+ * @param img    3-channel image where the text is placed
  * @param txt    The text itself
  * @param pos    Position in the image (for possibilities: top left corner,
  *               top right, bottom left or bottom right)
@@ -502,20 +503,67 @@ overlay_color(const cv::Mat & img,
   return 0;
 }
 
+/**
+ * @brief Adds suffix to the file name
+ * @param path   Path to the file
+ * @param suffix Suffix
+ * @param delim  String separating the original base name and the suffix
+ * @return New file name with the suffix
+ */
+std::string
+add_suffix(const std::string & path,
+           const std::string & suffix,
+           const std::string & delim = "_")
+{
+  namespace fs = boost::filesystem;
+  const fs::path p(path);
+  const fs::path nw_p = p.parent_path() / fs::path(p.stem().string() + delim + suffix + p.extension().string());
+  return nw_p.string();
+}
+
+/**
+ * @brief Separates the region enclosed by the contour in the image
+ * @param img    Original image
+ * @param u      Level set (the zero level of which gives us the region)
+ * @param invert Invert the selected region
+ * @return Image with a white background and the selected object(s) in the foreground
+ */
+cv::Mat
+separate(const cv::Mat & img,
+         const cv::Mat & u,
+         bool invert = false)
+{
+  cv::Mat selection(img.size(), CV_8UC3);
+  cv::Mat mask(img.size(), CV_8U);
+  cv::Mat u_cp(u.size(), CV_32F); // for some reason cv::threshold() works only with 32-bit floats
+
+  u.convertTo(u_cp, u_cp.type());
+  cv::threshold(u_cp, mask, 0, 1, cv::THRESH_BINARY);
+  mask.convertTo(mask, CV_8U);
+  if(invert) mask = 1 - mask;
+
+  selection.setTo(cv::Scalar(255, 255, 255));
+  img.copyTo(selection, mask);
+  return selection;
+}
+
 int
 main(int argc,
      char ** argv)
 {
-  std::string input_filename;
   double mu, nu, eps, tol, dt, fps;
   int max_steps;
-  std::vector<double> lambda1, lambda2;
-  std::string text_position;
+  std::vector<double> lambda1,
+                      lambda2;
+  std::string input_filename,
+              text_position;
   TextPosition pos = TextPosition::TopLeft;
-  bool grayscale = false,
-       write_video = false,
-       overlay_text = false,
-       verbose = false;
+  bool grayscale        = false,
+       write_video      = false,
+       overlay_text     = false,
+       object_selection = false,
+       invert           = false,
+       verbose          = false;
 
 ///-- Parse command line arguments
 ///   Negative values in multitoken are not an issue, b/c it doesn't make much sense
@@ -526,21 +574,23 @@ main(int argc,
     po::options_description desc("Allowed options", get_terminal_width());
     desc.add_options()
       ("help,h",                                                                        "this message")
-      ("input,i",        po::value<std::string>(&input_filename),                       "input image")
-      ("mu",             po::value<double>(&mu) -> default_value(0.5),                  "length penalty parameter")
-      ("nu",             po::value<double>(&nu) -> default_value(0),                    "area penalty parameter")
-      ("dt",             po::value<double>(&dt) -> default_value(1),                    "timestep")
-      ("lambda1",        po::value<std::vector<double>>(&lambda1) -> multitoken(),      "penalty of variance inside the contour (default: 1's)")
-      ("lambda2",        po::value<std::vector<double>>(&lambda2) -> multitoken(),      "penalty of variance outside the contour (default: 1's)")
-      ("epsilon,e",      po::value<double>(&eps) -> default_value(1),                   "smoothing parameter in Heaviside/delta")
-      ("tolerance,t",    po::value<double>(&tol) -> default_value(0.001),               "tolerance in stopping condition")
-      ("max-steps,N",    po::value<int>(&max_steps) -> default_value(-1),               "maximum nof iterations (negative means unlimited)")
-      ("fps,f",          po::value<double>(&fps) -> default_value(10),                  "video fps")
-      ("overlay-pos,P",  po::value<std::string>(&text_position) -> default_value("TL"), "overlay tex position; allowed only: TL, BL, TR, BR")
-      ("verbose,v",      po::bool_switch(&verbose),                                     "verbose mode")
-      ("grayscale,g",    po::bool_switch(&grayscale),                                   "read in as grayscale")
-      ("video,V",        po::bool_switch(&write_video),                                 "enable video output (changes the extension to .avi)")
-      ("overlay-text,O", po::bool_switch(&overlay_text),                                "add overlay text")
+      ("input,i",            po::value<std::string>(&input_filename),                       "input image")
+      ("mu",                 po::value<double>(&mu) -> default_value(0.5),                  "length penalty parameter")
+      ("nu",                 po::value<double>(&nu) -> default_value(0),                    "area penalty parameter")
+      ("dt",                 po::value<double>(&dt) -> default_value(1),                    "timestep")
+      ("lambda1",            po::value<std::vector<double>>(&lambda1) -> multitoken(),      "penalty of variance inside the contour (default: 1's)")
+      ("lambda2",            po::value<std::vector<double>>(&lambda2) -> multitoken(),      "penalty of variance outside the contour (default: 1's)")
+      ("epsilon,e",          po::value<double>(&eps) -> default_value(1),                   "smoothing parameter in Heaviside/delta")
+      ("tolerance,t",        po::value<double>(&tol) -> default_value(0.001),               "tolerance in stopping condition")
+      ("max-steps,N",        po::value<int>(&max_steps) -> default_value(-1),               "maximum nof iterations (negative means unlimited)")
+      ("fps,f",              po::value<double>(&fps) -> default_value(10),                  "video fps")
+      ("overlay-pos,P",      po::value<std::string>(&text_position) -> default_value("TL"), "overlay tex position; allowed only: TL, BL, TR, BR")
+      ("verbose,v",          po::bool_switch(&verbose),                                     "verbose mode")
+      ("grayscale,g",        po::bool_switch(&grayscale),                                   "read in as grayscale")
+      ("video,V",            po::bool_switch(&write_video),                                 "enable video output (changes the extension to .avi)")
+      ("overlay-text,O",     po::bool_switch(&overlay_text),                                "add overlay text")
+      ("invert-selection,I", po::bool_switch(&invert),                                      "invert selected region (see: select)")
+      ("select,s",           po::bool_switch(&object_selection),                            "separate the region encolosed by the contour (adds suffix _selection)")
     ;
     po::variables_map vm;
     po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
@@ -766,7 +816,13 @@ main(int argc,
 ///-- Check if we have achieved the desired precision
     const double u_diff_norm = cv::norm(u_diff, cv::NORM_L2);
     if(u_diff_norm <= stop_cond) break;
+
+///-- Reinitialize the contour
   }
+
+///-- Select the region enclosed by the contour and save it to the disk
+  if(object_selection)
+    cv::imwrite(add_suffix(input_filename, "selection"), separate(img, u, invert));
 
   return EXIT_SUCCESS;
 }
