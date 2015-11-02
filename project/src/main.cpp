@@ -37,6 +37,7 @@
                                                    // boost::program_options::notify()
 #include <boost/program_options/parsers.hpp> // boost::program_options::cmd_line::parser
 #include <boost/filesystem/operations.hpp> // boost::filesystem::exists()
+#include <boost/filesystem/convenience.hpp> // boost::filesystem::change_extension()
 
 #if defined(__gnu_linux__)
 #pragma GCC diagnostic pop
@@ -53,6 +54,13 @@
 /**
  * @file
  * @todo Add option to specify the initial contour from command line
+ * @todo See what Sobel kernel does with the image (or come up with a better kernel)
+ * @todo figure out how to parallelize convolution (it has to be possible if the input
+ *       and output images are different)
+ * @todo pixel selection, dump it
+ * @todo overlay text
+ * @todo write a cute readme
+ * @todo oh, and reinitialization; add interval parameter
  */
 
 typedef unsigned char uchar;
@@ -66,23 +74,26 @@ typedef std::vector<std::vector<double>> levelset;
 enum Region { Inside, Outside };
 
 /**
- * @brief Class for calculating delta function on the level set in parallel
+ * @brief Class for calculating function values on the level set in parallel.
+ *        Specifically, meant for taking regularized delta function on the level set.
+ *
+ * Credit to maythe4thbewithu (http://goo.gl/jPtLI2) for the idea.
  */
-class ParallelPixelDelta : public cv::ParallelLoopBody
+class ParallelPixelFunction : public cv::ParallelLoopBody
 {
 public:
   /**
    * @brief Constructor
    * @param _data  Level set
    * @param _w     Width of the level set matrix
-   * @param _delta Delta function
+   * @param _delta Any function
    */
-  ParallelPixelDelta(cv::Mat & _data,
-                     int _w,
-                     std::function<double(double)> _delta)
+  ParallelPixelFunction(cv::Mat & _data,
+                        int _w,
+                        std::function<double(double)> _func)
     : data(_data)
     , w(_w)
-    , delta(_delta)
+    , func(_func)
   {}
   /**
    * @brief Needed by cv::parallel_for_
@@ -91,17 +102,17 @@ public:
   virtual void operator () (const cv::Range & r) const
   {
     for(int i = r.start; i != r.end; ++i)
-      data.at<double>(i / w, i % w) = delta(data.at<double>(i / w, i % w));
+      data.at<double>(i / w, i % w) = func(data.at<double>(i / w, i % w));
   }
 
 private:
   cv::Mat & data;
   const int w;
-  const std::function<double(double)> delta;
+  const std::function<double(double)> func;
 };
 
 /**
- * @brief Returns terminal width.
+ * @brief Calculates the terminal/console width.
  *        Should work on all popular platforms.
  * @return Terminal width
  * @note Untested on Windows and MacOS.
@@ -406,10 +417,11 @@ main(int argc,
 {
   std::string input_filename,
               wtitle;
-  double mu, nu, eps, tol, dt;
+  double mu, nu, eps, tol, dt, fps;
   int max_steps;
   std::vector<double> lambda1, lambda2;
-  bool grayscale = false;
+  bool grayscale = false,
+       write_video = false;
 
 ///-- Parse command line arguments
 ///   Negative values in multitoken are not an issue, b/c it doesn't make much sense
@@ -428,9 +440,11 @@ main(int argc,
       ("lambda2",     po::value<std::vector<double>>(&lambda2) -> multitoken(),  "penalty of variance outside the contour (default: 1's)")
       ("epsilon,e",   po::value<double>(&eps) -> default_value(1),               "smoothing param in Heaviside/delta")
       ("tolerance,t", po::value<double>(&tol) -> default_value(0.001),           "tolerance in stopping condition")
-      ("max-steps,N", po::value<int>(&max_steps) -> default_value(-1),           "maximum nof iterations (default: unlimited)")
+      ("max-steps,N", po::value<int>(&max_steps) -> default_value(-1),           "maximum nof iterations (negative means unlimited)")
       ("title,T",     po::value<std::string>(&wtitle) -> default_value("Title"), "title of the window")
+      ("fps,f",       po::value<double>(&fps) -> default_value(10),              "video fps")
       ("grayscale,g", po::bool_switch(&grayscale),                               "read in as grayscale")
+      ("video,V",     po::bool_switch(&write_video),                             "enable video output (changes the extension to .avi)")
     ;
     po::variables_map vm;
     po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
@@ -512,11 +526,6 @@ main(int argc,
       std::cerr << "\nCannot have negative tolerance: " << tol << ".\n\n";
       return EXIT_FAILURE;
     }
-    if(vm.count("max-steps") && max_steps < 0)
-    {
-      std::cerr << "\nNegative maximum nof iterations: " << max_steps << ". "
-                << "Switching to INT_MAX instead.\n\n";
-    }
   }
   catch(std::exception & e)
   {
@@ -548,6 +557,14 @@ main(int argc,
   const int nof_channels = grayscale ? 1 : img.channels();
   const auto heaviside = std::bind(regularized_heaviside, std::placeholders::_1, eps);
   const auto delta = std::bind(regularized_delta, std::placeholders::_1, eps);
+
+///-- Set up the video writer
+  cv::VideoWriter vw;
+  if(write_video)
+  {
+    const std::string video_filename = boost::filesystem::change_extension(input_filename, "avi").string();
+    vw = cv::VideoWriter(video_filename, CV_FOURCC('X','V','I','D'), fps, img.size());
+  }
 
 ///-- Define kernels for forward, backward and central differences in x and y direction
   const std::map<std::string, cv::Mat> kernels = {
@@ -582,8 +599,9 @@ main(int argc,
 ///-- Timestep loop
   for(int t = 0; t < max_steps; ++t)
   {
-///-- Channel loop
     cv::Mat u_diff(cv::Mat::zeros(h, w, CV_64FC1));
+
+///-- Channel loop
     for(int k = 0; k < nof_channels; ++k)
     {
       cv::Mat channel = channels[k];
@@ -598,28 +616,39 @@ main(int argc,
     }
 ///-- Calculate the curvature (divergence of normalized gradient)
     const cv::Mat kappa = curvature(u, h, w, kernels);
+
 ///-- Mash the terms together
     u_diff /= nof_channels;
     u_diff -= nu;
     kappa *= mu;
     u_diff += kappa;
     u_diff *= dt;
+
 ///-- Run delta function on the level set
     cv::Mat u_cp = u.clone();
-    cv::parallel_for_(cv::Range(0, h * w), ParallelPixelDelta(u_cp, w, delta));
+    cv::parallel_for_(cv::Range(0, h * w), ParallelPixelFunction(u_cp, w, delta));
+
 ///-- Shift the level set
     cv::multiply(u_diff, u_cp, u_diff);
     u += u_diff;
+
+///-- Save the frame
+    if(write_video)
+    {
+      cv::Mat nw_img = img.clone();
+      draw_contour(nw_img, u);
+      vw.write(nw_img);
+    }
+
 ///-- Check if we have achieved the desired precision
+    const double u_diff_norm = cv::norm(u_diff, cv::NORM_L2);
+    if(u_diff_norm <= stop_cond) break;
   }
 
 ///-- Display the zero level set
-
   cv::Mat nw_img = img.clone();
   draw_contour(nw_img, u);
   cv::namedWindow(wtitle, cv::WINDOW_NORMAL);
-  cv::imshow(wtitle, img);
-  cv::waitKey(1000);
   cv::imshow(wtitle, nw_img);
   cv::waitKey(0);
 
