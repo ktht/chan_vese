@@ -59,7 +59,46 @@ typedef unsigned char uchar;
 typedef unsigned long ulong;
 typedef std::vector<std::vector<double>> levelset;
 
+/**
+ * @brief The Region enum
+ * @sa region_variance
+ */
 enum Region { Inside, Outside };
+
+/**
+ * @brief Class for calculating delta function on the level set in parallel
+ */
+class ParallelPixelDelta : public cv::ParallelLoopBody
+{
+public:
+  /**
+   * @brief Constructor
+   * @param _data  Level set
+   * @param _w     Width of the level set matrix
+   * @param _delta Delta function
+   */
+  ParallelPixelDelta(cv::Mat & _data,
+                     int _w,
+                     std::function<double(double)> _delta)
+    : data(_data)
+    , w(_w)
+    , delta(_delta)
+  {}
+  /**
+   * @brief Needed by cv::parallel_for_
+   * @param r Range of all indices (as if the level set is flatten)
+   */
+  virtual void operator () (const cv::Range & r) const
+  {
+    for(int i = r.start; i != r.end; ++i)
+      data.at<double>(i / w, i % w) = delta(data.at<double>(i / w, i % w));
+  }
+
+private:
+  cv::Mat & data;
+  const int w;
+  const std::function<double(double)> delta;
+};
 
 /**
  * @brief Returns terminal width.
@@ -320,6 +359,17 @@ variance_penalty(const cv::Mat & channel,
   return channel_term;
 }
 
+/**
+ * @brief Calculates the curvature (divergence of normalized gradient)
+ *        of the level set
+ * @param u       The level set
+ * @param h       Height of the level set matrix
+ * @param w       Width of the level set matrix
+ * @param kernels Kernels for forward, backward and central differences
+ *                in x and y direction
+ * @return Curvature
+ * @todo Add LaTeX-fied formula of the discretized Laplacian
+ */
 cv::Mat
 curvature(const cv::Mat & u,
           int h,
@@ -350,24 +400,12 @@ curvature(const cv::Mat & u,
   return upx;
 }
 
-void
-print_mat(const cv::Mat & m,
-          int x,
-          int y)
-{
-  for(int j = 0; j < y; ++j)
-  {
-    for(int i = 0; i < x; ++i)
-      std::cout << m.at<double>(i, j) << " ";
-    std::cout << "\n";
-  }
-}
-
 int
 main(int argc,
      char ** argv)
 {
-  std::string input_filename;
+  std::string input_filename,
+              wtitle;
   double mu, nu, eps, tol, dt;
   int max_steps;
   std::vector<double> lambda1, lambda2;
@@ -381,17 +419,18 @@ main(int argc,
     namespace po = boost::program_options;
     po::options_description desc("Allowed options", get_terminal_width());
     desc.add_options()
-      ("help,h",                                                                "this message")
-      ("input,i",     po::value<std::string>(&input_filename),                  "input image")
-      ("mu",          po::value<double>(&mu) -> default_value(0.5),             "length penalty parameter")
-      ("nu",          po::value<double>(&nu) -> default_value(0),               "area penalty parameter")
-      ("dt",          po::value<double>(&dt) -> default_value(1),               "timestep")
-      ("lambda1",     po::value<std::vector<double>>(&lambda1) -> multitoken(), "penalty of variance inside the contour (default: 1's)")
-      ("lambda2",     po::value<std::vector<double>>(&lambda2) -> multitoken(), "penalty of variance outside the contour (default: 1's)")
-      ("epsilon,e",   po::value<double>(&eps) -> default_value(1),              "smoothing param in Heaviside/delta")
-      ("tolerance,t", po::value<double>(&tol) -> default_value(0.001),          "tolerance in stopping condition")
-      ("max-steps,N", po::value<int>(&max_steps) -> default_value(-1),          "maximum nof iterations (default: unlimited)")
-      ("grayscale,g", po::bool_switch(&grayscale),                              "read in as grayscale")
+      ("help,h",                                                                 "this message")
+      ("input,i",     po::value<std::string>(&input_filename),                   "input image")
+      ("mu",          po::value<double>(&mu) -> default_value(0.5),              "length penalty parameter")
+      ("nu",          po::value<double>(&nu) -> default_value(0),                "area penalty parameter")
+      ("dt",          po::value<double>(&dt) -> default_value(1),                "timestep")
+      ("lambda1",     po::value<std::vector<double>>(&lambda1) -> multitoken(),  "penalty of variance inside the contour (default: 1's)")
+      ("lambda2",     po::value<std::vector<double>>(&lambda2) -> multitoken(),  "penalty of variance outside the contour (default: 1's)")
+      ("epsilon,e",   po::value<double>(&eps) -> default_value(1),               "smoothing param in Heaviside/delta")
+      ("tolerance,t", po::value<double>(&tol) -> default_value(0.001),           "tolerance in stopping condition")
+      ("max-steps,N", po::value<int>(&max_steps) -> default_value(-1),           "maximum nof iterations (default: unlimited)")
+      ("title,T",     po::value<std::string>(&wtitle) -> default_value("Title"), "title of the window")
+      ("grayscale,g", po::bool_switch(&grayscale),                               "read in as grayscale")
     ;
     po::variables_map vm;
     po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
@@ -557,26 +596,32 @@ main(int argc,
       const cv::Mat variance_outside = variance_penalty(channel, h, w, c2, lambda2[k]);
       u_diff += -variance_inside + variance_outside;
     }
-    u_diff /= nof_channels;
-    u_diff -= nu;
 ///-- Calculate the curvature (divergence of normalized gradient)
     const cv::Mat kappa = curvature(u, h, w, kernels);
+///-- Mash the terms together
+    u_diff /= nof_channels;
+    u_diff -= nu;
     kappa *= mu;
     u_diff += kappa;
     u_diff *= dt;
-
+///-- Run delta function on the level set
+    cv::Mat u_cp = u.clone();
+    cv::parallel_for_(cv::Range(0, h * w), ParallelPixelDelta(u_cp, w, delta));
+///-- Shift the level set
+    cv::multiply(u_diff, u_cp, u_diff);
+    u += u_diff;
 ///-- Check if we have achieved the desired precision
   }
 
 ///-- Display the zero level set
-/*
+
   cv::Mat nw_img = img.clone();
   draw_contour(nw_img, u);
-  cv::namedWindow("Display window", cv::WINDOW_NORMAL);
-  cv::imshow("Display window", img);
+  cv::namedWindow(wtitle, cv::WINDOW_NORMAL);
+  cv::imshow(wtitle, img);
   cv::waitKey(1000);
-  cv::imshow("Display window", nw_img);
+  cv::imshow(wtitle, nw_img);
   cv::waitKey(0);
-*/
+
   return EXIT_SUCCESS;
 }
