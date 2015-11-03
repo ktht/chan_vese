@@ -60,8 +60,6 @@
  * @todo
  *       - add an option to specify the initial contour from command line OR
  *         add capability to set the contour by clicking twice on the image (rectangle/circle)
- *       - figure out how to parallelize convolution (it has to be possible if the input
- *         and output images are different)
  *       - add level set reinitialization
  *       - refactor code (create CustomVideoWriter and CustomScreenWriter classes)
  * @mainpage
@@ -105,6 +103,27 @@ const cv::Scalar Colors::black = CV_RGB(  0,   0,   0);
 const cv::Scalar Colors::red   = CV_RGB(255,   0,   0);
 const cv::Scalar Colors::green = CV_RGB(  0, 255,   0);
 const cv::Scalar Colors::blue  = CV_RGB(  0,   0, 255);
+
+/**
+ * @brief Finite difference kernels
+ * @sa curvature
+ */
+struct Kernel
+{
+  static const cv::Mat fwd_x; ///< Forward difference in the x direction, @f$\Delta_x^+=f_{i+1,j}-f_{i,j}@f$
+  static const cv::Mat fwd_y; ///< Forward difference in the y direction, @f$\Delta_y^+=f_{i,j+1}-f_{i,j}@f$
+  static const cv::Mat bwd_x; ///< Backward difference in the x direction, @f$\Delta_x^-=f_{i,j}-f_{i-1,j}@f$
+  static const cv::Mat bwd_y; ///< Backward difference in the y direction, @f$\Delta_y^-=f_{i,j}-f_{i,j-1}@f$
+  static const cv::Mat ctr_x; ///< Central difference in the x direction, @f$\Delta_x^0=\frac{f_{i+1,j}-f_{i-1,j}}{2}@f$
+  static const cv::Mat ctr_y; ///< Central difference in the y direction, @f$\Delta_y^0=\frac{f_{i,j+1}-f_{i,j-1}}{2}@f$
+};
+
+const cv::Mat Kernel::fwd_x = (cv::Mat_<double>(1, 3) << 0,-1,1);
+const cv::Mat Kernel::fwd_y = (cv::Mat_<double>(3, 1) << 0,-1,1);
+const cv::Mat Kernel::bwd_x = (cv::Mat_<double>(1, 3) << -1,1,0);
+const cv::Mat Kernel::bwd_y = (cv::Mat_<double>(3, 1) << -1,1,0);
+const cv::Mat Kernel::ctr_x = (cv::Mat_<double>(1, 3) << -0.5,0,0.5);
+const cv::Mat Kernel::ctr_y = (cv::Mat_<double>(3, 1) << -0.5,0,0.5);
 
 /**
  * @brief Struct for holding basic parameters of a font
@@ -198,6 +217,35 @@ get_terminal_width()
 }
 
 /**
+ * @brief Adds suffix to the file name
+ * @param path   Path to the file
+ * @param suffix Suffix
+ * @param delim  String separating the original base name and the suffix
+ * @return New file name with the suffix
+ */
+std::string
+add_suffix(const std::string & path,
+           const std::string & suffix,
+           const std::string & delim = "_")
+{
+  namespace fs = boost::filesystem;
+  const fs::path p(path);
+  const fs::path nw_p = p.parent_path() / fs::path(p.stem().string() + delim + suffix + p.extension().string());
+  return nw_p.string();
+}
+
+/**
+ * @brief Displays error message surrounded by newlines and exits.
+ * @param msg Message to display.
+*/
+[[ noreturn ]] void
+msg_exit(const std::string & msg)
+{
+  std::cerr << "\n" << msg << "\n\n";
+  std::exit(EXIT_FAILURE);
+}
+
+/**
  * @brief Regularized (smoothed) Heaviside step function
  * @f[ H_\epsilon(x)=\frac{1}{2}\Big[1+\frac{2}{\pi}\arctan\Big(\frac{x}{\epsilon}\Big)\Big] @f]
  * where @f$x@f$ is the argument and @f$\epsilon@f$ the smoothing parameter
@@ -227,49 +275,6 @@ regularized_delta(double x,
 {
   const double pi = boost::math::constants::pi<double>();
   return eps / (pi * (std::pow(eps, 2) + std::pow(x, 2)));
-}
-
-/**
- * @brief Calculates average regional variance
- * @f[ c_i = \frac{\int_\Omega I_i(x,y)g(u(x,y))\mathrm{d}x\mathrm{d}y}{
-                   \int_\Omega g(u(x,y))\mathrm{d}x\mathrm{d}y}\,, @f]
- * where @f$u(x,y)@f$ is the level set function,
- * @f$I_i@f$ is the @f$i@f$-th channel in the image and
- * @f$g@f$ is either the Heaviside function @f$H(x)@f$
- * (for region encolosed by the contour) or @f$1-H(x)@f$ (for region outside
- * the contour).
- * @param img       Input image (channel), @f$I_i(x,y)@f$
- * @param u         Level set, @f$u(x,y)@f$
- * @param h         Height of the image
- * @param w         Width of the image
- * @param region    Region either inside or outside the contour
- * @param heaviside Heaviside function, @f$H(x)@f$
- *                  One might also try different regularized heaviside functions
- *                  or even a non-smoothed one; that's why we've left it as a parameter
- * @return          Average variance of the given region in the image
- * @sa variance_penalty, Region
- */
-double
-region_variance(const cv::Mat & img,
-                const cv::Mat & u,
-                int h,
-                int w,
-                Region region,
-                std::function<double(double)> heaviside)
-{
-  double nom = 0.0,
-         denom = 0.0;
-  auto H = (region == Region::Inside)
-             ? heaviside
-             : [&heaviside](double x) -> double { return 1 - heaviside(x); };
-  for(int i = 0; i < h; ++i)
-    for(int j = 0; j < w; ++j)
-    {
-      double h = H(u.at<double>(i, j));
-      nom += img.at<uchar>(i, j) * h;
-      denom += h;
-    }
-  return nom / denom;
 }
 
 /**
@@ -409,97 +414,6 @@ draw_contour(cv::Mat & dst,
 }
 
 /**
- * @brief Calculates variance penalty matrix,
- * @f[ \lambda_i\int_\Omega|I_i(x,y)-c_i|^2 g(u(x,y))\,\mathrm{d}x\mathrm{d}y\,, @f]
- * where @f$u(x,y)@f$ is the level set function,
- * @f$I_i@f$ is the @f$i@f$-th channel in the image and
- * @f$g@f$ is either the Heaviside function @f$H(x)@f$
- * (for region encolosed by the contour) or @f$1-H(x)@f$ (for region outside
- * the contour).
- * @param channel Channel of the input image, @f$I_i(x,y)@f$
- * @param h       Height of the image
- * @param w       Width of the image
- * @param c       Variance of particular region in the image, @f$c_i@f$
- * @param lambda  Penalty parameter, @f$\lambda_i@f$
- * @return Variance penalty matrix
- * @sa region_variance
- */
-cv::Mat
-variance_penalty(const cv::Mat & channel,
-                 int h,
-                 int w,
-                 double c,
-                 double lambda)
-{
-  cv::Mat channel_term(cv::Mat::zeros(h, w, CV_64FC1));
-  channel.convertTo(channel_term, channel_term.type());
-  channel_term -= c;
-  cv::pow(channel_term, 2, channel_term);
-  channel_term *= lambda;
-  return channel_term;
-}
-
-/**
- * @brief Calculates the curvature (divergence of normalized gradient)
- *        of the level set:
- *        @f[
- *        \kappa=
- * \Delta_x^-\left(\frac{\Delta_x^+u_{i,j}}
- * {\sqrt{\eta^2+(\Delta_x^+u_{i,j})^2+(\Delta_y^0u_{i,j})^2}}\right)+
- * \Delta_y^-\left(\frac{\Delta_y^+u_{i,j}}
- * {\sqrt{\eta^2+(\Delta_x^0u_{i,j})^2+(\Delta_y^+u_{i,j})^2}}\right)\,,
- *        @f]
- * where
- *   - @f$ \Delta_x^{\pm} @f$ and @f$ \Delta_y^{\pm} @f$ correspond to forward (@f$+@f$)
- *     and backward (@f$-@f$) difference in @f$x@f$ and @f$y@f$ direction, respectively
- *   - @f$\Delta_x^0@f$ and @f$\Delta_y^0@f$ correspond to central differences in
- *     @f$x@f$ and @f$y@f$ direction, respectively
- *   - @f$\eta@f$ is a small parameter to avoid division by zero
- *   - @f$u_{i,j}@f$ is the level set for @f$m\times n@f$ image
- * The curvature is calculated by convoluting forward, backward and central difference
- * kernels with the level set. The method assumes duplicating the pixels near the border:
- * @f[ u_{-1,j}=u_{0,j}\,,\quad u_{m,j}=u_{m-1,j}\,,\quad
- *     u_{i,-1}=u_{i,0}\,,\quad u_{i,n}=u_{n-1,j}\,. @f]
- * This method ensures that the curvature is centered at a given point and only one
- * extra pixel is needed per calculation.
- * @param u       The level set, @f$u_{i,j}@f$
- * @param h       Height of the level set matrix
- * @param w       Width of the level set matrix
- * @param kernels Kernels for forward, backward and central differences
- *                in x and y direction
- * @return Curvature
- */
-cv::Mat
-curvature(const cv::Mat & u,
-          int h,
-          int w,
-          const std::map<std::string, cv::Mat> & kernels)
-{
-  const double eta = 1E-8;
-  const double eta2 = std::pow(eta, 2);
-  cv::Mat upx (h, w, CV_64FC1), upy (h, w, CV_64FC1),
-          ucx2(h, w, CV_64FC1), ucy2(h, w, CV_64FC1),
-          upx2(h, w, CV_64FC1), upy2(h, w, CV_64FC1),
-          nx  (h, w, CV_64FC1), ny  (h, w, CV_64FC1);
-  cv::filter2D(u, upx,  CV_64FC1, kernels.at("fwd_x"), cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
-  cv::filter2D(u, upy,  CV_64FC1, kernels.at("fwd_y"), cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
-  cv::filter2D(u, ucx2, CV_64FC1, kernels.at("ctr_x"), cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
-  cv::filter2D(u, ucy2, CV_64FC1, kernels.at("ctr_y"), cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
-  cv::pow(ucx2, 2, ucx2);
-  cv::pow(ucy2, 2, ucy2);
-  cv::pow(upx,  2, upx2);
-  cv::pow(upy,  2, upy2);
-  cv::sqrt(upx2 + ucy2 + eta2, nx);
-  cv::sqrt(ucx2 + upy2 + eta2, ny);
-  cv::divide(upx, nx, upx);
-  cv::divide(upy, ny, upy);
-  cv::filter2D(upx, upx, CV_64FC1, kernels.at("bwd_x"), cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
-  cv::filter2D(upy, upy, CV_64FC1, kernels.at("bwd_y"), cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
-  upx += upy;
-  return upx;
-}
-
-/**
  * @brief Finds proper font color for overlay text
  *        The color is determined by the average intensity of the ROI where
  *        the text is placed
@@ -557,21 +471,134 @@ overlay_color(const cv::Mat & img,
 }
 
 /**
- * @brief Adds suffix to the file name
- * @param path   Path to the file
- * @param suffix Suffix
- * @param delim  String separating the original base name and the suffix
- * @return New file name with the suffix
+ * @brief Calculates average regional variance
+ * @f[ c_i = \frac{\int_\Omega I_i(x,y)g(u(x,y))\mathrm{d}x\mathrm{d}y}{
+                   \int_\Omega g(u(x,y))\mathrm{d}x\mathrm{d}y}\,, @f]
+ * where @f$u(x,y)@f$ is the level set function,
+ * @f$I_i@f$ is the @f$i@f$-th channel in the image and
+ * @f$g@f$ is either the Heaviside function @f$H(x)@f$
+ * (for region encolosed by the contour) or @f$1-H(x)@f$ (for region outside
+ * the contour).
+ * @param img       Input image (channel), @f$I_i(x,y)@f$
+ * @param u         Level set, @f$u(x,y)@f$
+ * @param h         Height of the image
+ * @param w         Width of the image
+ * @param region    Region either inside or outside the contour
+ * @param heaviside Heaviside function, @f$H(x)@f$
+ *                  One might also try different regularized heaviside functions
+ *                  or even a non-smoothed one; that's why we've left it as a parameter
+ * @return          Average variance of the given region in the image
+ * @sa variance_penalty, Region
  */
-std::string
-add_suffix(const std::string & path,
-           const std::string & suffix,
-           const std::string & delim = "_")
+double
+region_variance(const cv::Mat & img,
+                const cv::Mat & u,
+                int h,
+                int w,
+                Region region,
+                std::function<double(double)> heaviside)
 {
-  namespace fs = boost::filesystem;
-  const fs::path p(path);
-  const fs::path nw_p = p.parent_path() / fs::path(p.stem().string() + delim + suffix + p.extension().string());
-  return nw_p.string();
+  double nom = 0.0,
+         denom = 0.0;
+  auto H = (region == Region::Inside)
+             ? heaviside
+             : [&heaviside](double x) -> double { return 1 - heaviside(x); };
+  for(int i = 0; i < h; ++i)
+    for(int j = 0; j < w; ++j)
+    {
+      double h = H(u.at<double>(i, j));
+      nom += img.at<uchar>(i, j) * h;
+      denom += h;
+    }
+  return nom / denom;
+}
+
+/**
+ * @brief Calculates variance penalty matrix,
+ * @f[ \lambda_i\int_\Omega|I_i(x,y)-c_i|^2 g(u(x,y))\,\mathrm{d}x\mathrm{d}y\,, @f]
+ * where @f$u(x,y)@f$ is the level set function,
+ * @f$I_i@f$ is the @f$i@f$-th channel in the image and
+ * @f$g@f$ is either the Heaviside function @f$H(x)@f$
+ * (for region encolosed by the contour) or @f$1-H(x)@f$ (for region outside
+ * the contour).
+ * @param channel Channel of the input image, @f$I_i(x,y)@f$
+ * @param h       Height of the image
+ * @param w       Width of the image
+ * @param c       Variance of particular region in the image, @f$c_i@f$
+ * @param lambda  Penalty parameter, @f$\lambda_i@f$
+ * @return Variance penalty matrix
+ * @sa region_variance
+ */
+cv::Mat
+variance_penalty(const cv::Mat & channel,
+                 int h,
+                 int w,
+                 double c,
+                 double lambda)
+{
+  cv::Mat channel_term(cv::Mat::zeros(h, w, CV_64FC1));
+  channel.convertTo(channel_term, channel_term.type());
+  channel_term -= c;
+  cv::pow(channel_term, 2, channel_term);
+  channel_term *= lambda;
+  return channel_term;
+}
+
+/**
+ * @brief Calculates the curvature (divergence of normalized gradient)
+ *        of the level set:
+ *        @f[
+ *        \kappa=
+ * \Delta_x^-\left(\frac{\Delta_x^+u_{i,j}}
+ * {\sqrt{\eta^2+(\Delta_x^+u_{i,j})^2+(\Delta_y^0u_{i,j})^2}}\right)+
+ * \Delta_y^-\left(\frac{\Delta_y^+u_{i,j}}
+ * {\sqrt{\eta^2+(\Delta_x^0u_{i,j})^2+(\Delta_y^+u_{i,j})^2}}\right)\,,
+ *        @f]
+ * where
+ *   - @f$ \Delta_x^{\pm} @f$ and @f$ \Delta_y^{\pm} @f$ correspond to forward (@f$+@f$)
+ *     and backward (@f$-@f$) difference in @f$x@f$ and @f$y@f$ direction, respectively
+ *   - @f$\Delta_x^0@f$ and @f$\Delta_y^0@f$ correspond to central differences in
+ *     @f$x@f$ and @f$y@f$ direction, respectively
+ *   - @f$\eta@f$ is a small parameter to avoid division by zero
+ *   - @f$u_{i,j}@f$ is the level set for @f$m\times n@f$ image
+ * The curvature is calculated by convoluting forward, backward and central difference
+ * kernels with the level set. The method assumes duplicating the pixels near the border:
+ * @f[ u_{-1,j}=u_{0,j}\,,\quad u_{m,j}=u_{m-1,j}\,,\quad
+ *     u_{i,-1}=u_{i,0}\,,\quad u_{i,n}=u_{n-1,j}\,. @f]
+ * This method ensures that the curvature is centered at a given point and only one
+ * extra pixel is needed per calculation.
+ * @param u       The level set, @f$u_{i,j}@f$
+ * @param h       Height of the level set matrix
+ * @param w       Width of the level set matrix
+ * @return Curvature
+ */
+cv::Mat
+curvature(const cv::Mat & u,
+          int h,
+          int w)
+{
+  const double eta = 1E-8;
+  const double eta2 = std::pow(eta, 2);
+  cv::Mat upx (h, w, CV_64FC1), upy (h, w, CV_64FC1),
+          ucx2(h, w, CV_64FC1), ucy2(h, w, CV_64FC1),
+          upx2(h, w, CV_64FC1), upy2(h, w, CV_64FC1),
+          nx  (h, w, CV_64FC1), ny  (h, w, CV_64FC1);
+  cv::filter2D(u, upx,  CV_64FC1, Kernel::fwd_x, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
+  cv::filter2D(u, upy,  CV_64FC1, Kernel::fwd_y, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
+  cv::filter2D(u, ucx2, CV_64FC1, Kernel::ctr_x, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
+  cv::filter2D(u, ucy2, CV_64FC1, Kernel::ctr_y, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
+  cv::pow(ucx2, 2, ucx2);
+  cv::pow(ucy2, 2, ucy2);
+  cv::pow(upx,  2, upx2);
+  cv::pow(upy,  2, upy2);
+  cv::sqrt(upx2 + ucy2 + eta2, nx);
+  cv::sqrt(ucx2 + upy2 + eta2, ny);
+  cv::divide(upx, nx, upx);
+  cv::divide(upy, ny, upy);
+  cv::filter2D(upx, upx, CV_64FC1, Kernel::bwd_x, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
+  cv::filter2D(upy, upy, CV_64FC1, Kernel::bwd_y, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
+  upx += upy;
+  return upx;
 }
 
 /**
@@ -598,17 +625,6 @@ separate(const cv::Mat & img,
   selection.setTo(cv::Scalar(255, 255, 255));
   img.copyTo(selection, mask);
   return selection;
-}
-
-/**
- * @brief Displays error message surrounded by newlines and exits.
- * @param msg Message to display.
-*/
-[[ noreturn ]] void
-msg_exit(const std::string & msg)
-{
-  std::cerr << "\n" << msg << "\n\n";
-  std::exit(EXIT_FAILURE);
 }
 
 int
@@ -777,16 +793,6 @@ main(int argc,
     vw = cv::VideoWriter(video_filename, CV_FOURCC('X','V','I','D'), fps, img.size());
   }
 
-//-- Define kernels for forward, backward and central differences in x and y direction
-  const std::map<std::string, cv::Mat> kernels = {
-    { "fwd_x", (cv::Mat_<double>(3, 3) << 0,   0,0,   0,-1,  1,0,  0,0) },
-    { "fwd_y", (cv::Mat_<double>(3, 3) << 0,   0,0,   0,-1,  0,0,  1,0) },
-    { "bwd_x", (cv::Mat_<double>(3, 3) << 0,   0,0,  -1, 1,  0,0,  0,0) },
-    { "bwd_y", (cv::Mat_<double>(3, 3) << 0,  -1,0,   0, 1,  0,0,  0,0) },
-    { "ctr_x", (cv::Mat_<double>(3, 3) << 0,   0,0,-0.5, 0,0.5,0,  0,0) },
-    { "ctr_y", (cv::Mat_<double>(3, 3) << 0,-0.5,0,   0, 0,  0,0,0.5,0) },
-  };
-
 //-- Construct the level set
   cv::Mat u = levelset_checkerboard(h, w);
 
@@ -837,7 +843,7 @@ main(int argc,
       u_diff += -variance_inside + variance_outside;
     }
 //-- Calculate the curvature (divergence of normalized gradient)
-    const cv::Mat kappa = curvature(u, h, w, kernels);
+    const cv::Mat kappa = curvature(u, h, w);
 
 //-- Mash the terms together
     u_diff /= nof_channels;

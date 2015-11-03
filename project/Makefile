@@ -83,7 +83,7 @@ endif
 .PHONY: clean doc
 
 doc:
-	@$(shell doxygen Doxyfile)
+	doxygen Doxyfile
 
 clean:
 	@rm -rf $(OBJ_PATH) $(BIN_PATH) $(DEP_PATH) $(DOC_DIR)
