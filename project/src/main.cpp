@@ -54,18 +54,24 @@
 
 /**
  * @file
- * @todo add an option to specify the initial contour from command line OR
-         add capability to set the contour by clicking twice on the image (rectangle/circle)
- * @todo figure out how to parallelize convolution (it has to be possible if the input
- *       and output images are different)
- * @todo write a cute readme
- * @todo print progress (e.g. average variances, L2 norm of differential level set etc)
- * @todo Doxyfile
+ * @todo
+ *       - add an option to specify the initial contour from command line OR
+ *         add capability to set the contour by clicking twice on the image (rectangle/circle)
+ *       - figure out how to parallelize convolution (it has to be possible if the input
+ *         and output images are different)
+ *       - print progress (e.g. average variances, L2 norm of differential level set etc)
+ *       - add level set reinitialization
+ * @mainpage
+ * @section intro_sec Introduction
+ * This is the implementation of Chan-Sandberg-Vese segmentation algorithm in C++.
+ *
+ * The article @cite Getreuer2012 is taken as a starting point in this implementation.
+ * However, the text was short of describing vector-valued, i.e. multi-channel (RGB) images.
+ * Fortunately, the original paper @cite Chan2000 proved to be useful.
  */
 
-typedef unsigned char uchar;
-typedef unsigned long ulong;
-typedef std::vector<std::vector<double>> levelset;
+typedef unsigned char uchar; ///< Short for unsigned char
+typedef unsigned long ulong; ///< Short for unsigned long int
 
 /**
  * @brief The Region enum
@@ -84,11 +90,11 @@ enum TextPosition { TopLeft, TopRight, BottomLeft, BottomRight };
  */
 struct Colors
 {
-  static const cv::Scalar white;
-  static const cv::Scalar black;
-  static const cv::Scalar red;
-  static const cv::Scalar green;
-  static const cv::Scalar blue;
+  static const cv::Scalar white; ///< White
+  static const cv::Scalar black; ///< Black
+  static const cv::Scalar red;   ///< Red
+  static const cv::Scalar green; ///< Green
+  static const cv::Scalar blue;  ///< Blue
 };
 
 const cv::Scalar Colors::white = CV_RGB(255, 255, 255);
@@ -102,6 +108,15 @@ const cv::Scalar Colors::blue  = CV_RGB(  0,   0, 255);
  */
 struct FontParameters
 {
+  /**
+   * @brief FontParameters constructor
+   * @param font_face      Font (type)face, expecting CV_FONT_HERSHEY_*
+   * @param font_scale     Font size (relative; multiplied with base font size)
+   * @param font_thickness Font thickness
+   * @param font_linetype  Font line type, e.g. 8 (8-connected), 4 (4-connected)
+   *                       or CV_AA (antialiased font)
+   * @param font_baseline  Bottom padding in y-direction?
+   */
   FontParameters(int font_face,
                  double font_scale,
                  int font_thickness,
@@ -113,18 +128,18 @@ struct FontParameters
     , type(font_linetype)
     , baseline(font_baseline)
   {}
-  const int face;
-  const double scale;
-  const int thickness;
-  const int type;
-  int baseline;
+  const int face;      ///< Font (type)face
+  const double scale;  ///< Font size (relative; multiplied with base font size)
+  const int thickness; ///< Font thickness
+  const int type;      ///< Font line type
+  int baseline;        ///< Bottom padding in y-direction?
 };
 
 /**
  * @brief Class for calculating function values on the level set in parallel.
  *        Specifically, meant for taking regularized delta function on the level set.
  *
- * Credit to maythe4thbewithu (http://goo.gl/jPtLI2) for the idea.
+ * Credit to 'maythe4thbewithu' for the idea: http://goo.gl/jPtLI2
  */
 class ParallelPixelFunction : public cv::ParallelLoopBody
 {
@@ -133,7 +148,7 @@ public:
    * @brief Constructor
    * @param _data  Level set
    * @param _w     Width of the level set matrix
-   * @param _delta Any function
+   * @param _func  Any function
    */
   ParallelPixelFunction(cv::Mat & _data,
                         int _w,
@@ -181,10 +196,11 @@ get_terminal_width()
 
 /**
  * @brief Regularized (smoothed) Heaviside step function
- * @f[ $H_\epsilon(x)=\frac{1}{2}\Big(1+\frac{2}{\pi}\atan\frac{x}{\epsilon}\Big)$ @f]
- * @param x   Argument of the step function
- * @param eps Smoothing parameter
- * @return Value of the step function at x
+ * @f[ H_\epsilon(x)=\frac{1}{2}\Big[1+\frac{2}{\pi}\arctan\Big(\frac{x}{\epsilon}\Big)\Big] @f]
+ * where @f$x@f$ is the argument and @f$\epsilon@f$ the smoothing parameter
+ * @param x   Argument of the step function, @f$x@f$
+ * @param eps Smoothing parameter, @f$\epsilon@f$
+ * @return Value of the step function at @f$x@f$
  */
 constexpr double
 regularized_heaviside(double x,
@@ -196,10 +212,11 @@ regularized_heaviside(double x,
 
 /**
  * @brief Regularized (smoothed) Dirac delta function
- * @f[ $\delta_\epsilon(x)=\frac{\epsilon}{\pi(\epsilon^2+x^2)}$ @f]
- * @param x   Argument of the delta function
- * @param eps Smoothing parameter
- * @return Value of the delta function at x
+ * @f[ \delta_\epsilon(x)=\frac{\epsilon}{\pi(\epsilon^2+x^2)}\,, @f]
+ * where @f$x@f$ is the argument and @f$\epsilon@f$ the smoothing parameter
+ * @param x   Argument of the delta function, @f$x@f$
+ * @param eps Smoothing parameter, @f$\epsilon@f$
+ * @return Value of the delta function at @f$x@f$
  */
 constexpr double
 regularized_delta(double x,
@@ -211,23 +228,23 @@ regularized_delta(double x,
 
 /**
  * @brief Calculates average regional variance
- * @f[ $c_i = \frac{\int_\Omega I_i(x,y)g(u(x,y))\mathrm{d}x\mathrm{d}y}{
-                    \int_\Omega g(u(x,y))\mathrm{d}x\mathrm{d}y}$ @f],
- * where @f[ $u(x,y)$ @f] is the level set function,
- * @f[ $I_i$ @f] is the @f[ $i$ @f]-th channel in the image and
- * @f[ $g$ @f] is either the Heaviside function @f[$H(x)$@f]
- * (for region encolosed by the contour) or @f[$1-H(x)$@f] (for region outside
+ * @f[ c_i = \frac{\int_\Omega I_i(x,y)g(u(x,y))\mathrm{d}x\mathrm{d}y}{
+                   \int_\Omega g(u(x,y))\mathrm{d}x\mathrm{d}y}\,, @f]
+ * where @f$u(x,y)@f$ is the level set function,
+ * @f$I_i@f$ is the @f$i@f$-th channel in the image and
+ * @f$g@f$ is either the Heaviside function @f$H(x)@f$
+ * (for region encolosed by the contour) or @f$1-H(x)@f$ (for region outside
  * the contour).
- * @param img       Input image (channel), @f[ $I_i(x,y)$ @f]
- * @param u         Level set, @f[ $u(x,y)$ @f]
+ * @param img       Input image (channel), @f$I_i(x,y)@f$
+ * @param u         Level set, @f$u(x,y)@f$
  * @param h         Height of the image
  * @param w         Width of the image
  * @param region    Region either inside or outside the contour
- * @param heaviside Heaviside function, @f[ $H(x)$ @f]
+ * @param heaviside Heaviside function, @f$H(x)@f$
  *                  One might also try different regularized heaviside functions
  *                  or even a non-smoothed one; that's why we've left it as a parameter
  * @return          Average variance of the given region in the image
- * @sa variance_penalty
+ * @sa variance_penalty, Region
  */
 double
 region_variance(const cv::Mat & img,
@@ -285,8 +302,8 @@ levelset_rect(int h,
  * @brief Creates a level set with circular zero level set
  * @param w Width of the level set matrix
  * @param h Height of the level set matrix
- * @param d Diameter of the circle in relative units
- *          Its value must be within (0, 1); 1 indicates that
+ * @param d Diameter of the circle in relative units;
+ *          its value must be within (0, 1); 1 indicates that
  *          the diameter is minimum of the image dimensions
  * @return The level set
  */
@@ -316,7 +333,8 @@ levelset_circ(int h,
 /**
  * @brief Creates a level set with a checkerboard pattern at zero level
  *        The zero level set is found via the formula
- *        @f[ $ \mathrm{sign}\sin\Big(\frac{x}{5}\Big)\sin\Big(\frac{y}{5}\Big) $ @f].
+ *        @f[ \mathrm{sign}\Big[\sin\Big(\frac{x}{5}\Big)\sin\Big(\frac{y}{5}\Big)\Big]\,, @f]
+ *        where @f$x@f$ and @f$y@f$ are the positions in the image
  * @param w Width of the level set matrix
  * @param h Height of the level set matrix
  * @return The levelset
@@ -359,8 +377,9 @@ levelset2contour(const cv::Mat & u)
 
 /**
  * @brief Draws the zero level set on a given image
- * @param dst The image where the contour is placed.
- * @param u   The level set, the zero level of which is plotted.
+ * @param dst        The image where the contour is placed.
+ * @param u          The level set, the zero level of which is plotted.
+ * @param line_color Contour line color
  * @return 0
  * @sa levelset2contour
  */
@@ -388,17 +407,17 @@ draw_contour(cv::Mat & dst,
 
 /**
  * @brief Calculates variance penalty matrix,
- * @f[ $\lambda_i\int_\Omega|I_i(x,y)-c_i|^2 g(u(x,y))\mathrm{d}x\mathrm{d}y$ @f],
- * where @f[ $u(x,y)$ @f] is the level set function,
- * @f[ $I_i$ @f] is the @f[ $i$ @f]-th channel in the image and
- * @f[ $g$ @f] is either the Heaviside function @f[$H(x)$@f]
- * (for region encolosed by the contour) or @f[$1-H(x)$@f] (for region outside
+ * @f[ \lambda_i\int_\Omega|I_i(x,y)-c_i|^2 g(u(x,y))\,\mathrm{d}x\mathrm{d}y\,, @f]
+ * where @f$u(x,y)@f$ is the level set function,
+ * @f$I_i@f$ is the @f$i@f$-th channel in the image and
+ * @f$g@f$ is either the Heaviside function @f$H(x)@f$
+ * (for region encolosed by the contour) or @f$1-H(x)@f$ (for region outside
  * the contour).
- * @param channel Channel of the input image, @f[ $I_i(x,y)$ @f]
+ * @param channel Channel of the input image, @f$I_i(x,y)@f$
  * @param h       Height of the image
  * @param w       Width of the image
- * @param c       Variance of particular region in the image, @f[ $c_i$ @f]
- * @param lambda  Penalty parameter, @f[ $\lambda_i$ @f]
+ * @param c       Variance of particular region in the image, @f$c_i@f$
+ * @param lambda  Penalty parameter, @f$\lambda_i@f$
  * @return Variance penalty matrix
  * @sa region_variance
  */
@@ -419,14 +438,33 @@ variance_penalty(const cv::Mat & channel,
 
 /**
  * @brief Calculates the curvature (divergence of normalized gradient)
- *        of the level set
- * @param u       The level set
+ *        of the level set:
+ *        @f[
+ *        \kappa=
+ * \Delta_x^-\left(\frac{\Delta_x^+u_{i,j}}
+ * {\sqrt{\eta^2+(\Delta_x^+u_{i,j})^2+(\Delta_y^0u_{i,j})^2}}\right)+
+ * \Delta_y^-\left(\frac{\Delta_y^+u_{i,j}}
+ * {\sqrt{\eta^2+(\Delta_x^0u_{i,j})^2+(\Delta_y^+u_{i,j})^2}}\right)\,,
+ *        @f]
+ * where
+ *   - @f$ \Delta_x^{\pm} @f$ and @f$ \Delta_y^{\pm} @f$ correspond to forward (@f$+@f$)
+ *     and backward (@f$-@f$) difference in @f$x@f$ and @f$y@f$ direction, respectively
+ *   - @f$\Delta_x^0@f$ and @f$\Delta_y^0@f$ correspond to central differences in
+ *     @f$x@f$ and @f$y@f$ direction, respectively
+ *   - @f$\eta@f$ is a small parameter to avoid division by zero
+ *   - @f$u_{i,j}@f$ is the level set for @f$m\times n@f$ image
+ * The curvature is calculated by convoluting forward, backward and central difference
+ * kernels with the level set. The method assumes duplicating the pixels near the border:
+ * @f[ u_{-1,j}=u_{0,j}\,,\quad u_{m,j}=u_{m-1,j}\,,\quad
+ *     u_{i,-1}=u_{i,0}\,,\quad u_{i,n}=u_{n-1,j}\,. @f]
+ * This method ensures that the curvature is centered at a given point and only one
+ * extra pixel is needed per calculation.
+ * @param u       The level set, @f$u_{i,j}@f$
  * @param h       Height of the level set matrix
  * @param w       Width of the level set matrix
  * @param kernels Kernels for forward, backward and central differences
  *                in x and y direction
  * @return Curvature
- * @todo Add LaTeX-fied formula of the discretized Laplacian
  */
 cv::Mat
 curvature(const cv::Mat & u,
@@ -574,6 +612,8 @@ int
 main(int argc,
      char ** argv)
 {
+/// Performs Chan-Vese segmentation on a given input image
+
   double mu, nu, eps, tol, dt, fps;
   int max_steps,
       reinit_interval;
@@ -591,9 +631,9 @@ main(int argc,
   TextPosition pos = TextPosition::TopLeft;
   cv::Scalar contour_color = Colors::blue;
 
-///-- Parse command line arguments
-///   Negative values in multitoken are not an issue, b/c it doesn't make much sense
-///   to use negative values for lambda1 and lambda2
+//-- Parse command line arguments
+//   Negative values in multitoken are not an issue, b/c it doesn't make much sense
+//   to use negative values for lambda1 and lambda2
   try
   {
     namespace po = boost::program_options;
@@ -704,20 +744,20 @@ main(int argc,
     msg_exit("error: " + std::string(e.what()));
   }
 
-///-- Read the image (grayscale or BGR? RGB? BGR? help)
+//-- Read the image (grayscale or BGR? RGB? BGR? help)
   cv::Mat _img;
   if(grayscale) _img = cv::imread(input_filename, CV_LOAD_IMAGE_GRAYSCALE);
   else          _img = cv::imread(input_filename, CV_LOAD_IMAGE_COLOR);
   if(! _img.data)
     msg_exit("Error on opening \"" + input_filename + "\" (probably not an image)!");
 
-///-- Second conversion needed since we want to display a colored contour on a grayscale image
+//-- Second conversion needed since we want to display a colored contour on a grayscale image
   cv::Mat img;
   if(grayscale) cv::cvtColor(_img, img, CV_GRAY2RGB);
   else          img = _img;
   _img.release();
 
-///-- Determine the constants and define functionals
+//-- Determine the constants and define functionals
   max_steps = max_steps < 0 ? std::numeric_limits<int>::max() : max_steps;
   const int h = img.rows;
   const int w = img.cols;
@@ -725,10 +765,10 @@ main(int argc,
   const auto heaviside = std::bind(regularized_heaviside, std::placeholders::_1, eps);
   const auto delta = std::bind(regularized_delta, std::placeholders::_1, eps);
 
-///-- Set up overlay font
+//-- Set up overlay font
   FontParameters fparam(CV_FONT_HERSHEY_PLAIN, 0.8, 1, 0, CV_AA);
 
-///-- Set up the video writer
+//-- Set up the video writer
   cv::VideoWriter vw;
   if(write_video)
   {
@@ -736,7 +776,7 @@ main(int argc,
     vw = cv::VideoWriter(video_filename, CV_FOURCC('X','V','I','D'), fps, img.size());
   }
 
-///-- Define kernels for forward, backward and central differences in x and y direction
+//-- Define kernels for forward, backward and central differences in x and y direction
   const std::map<std::string, cv::Mat> kernels = {
     { "fwd_x", (cv::Mat_<double>(3, 3) << 0,   0,0,   0,-1,  1,0,  0,0) },
     { "fwd_y", (cv::Mat_<double>(3, 3) << 0,   0,0,   0,-1,  0,0,  1,0) },
@@ -746,15 +786,15 @@ main(int argc,
     { "ctr_y", (cv::Mat_<double>(3, 3) << 0,-0.5,0,   0, 0,  0,0,0.5,0) },
   };
 
-///-- Construct the level set
+//-- Construct the level set
   cv::Mat u = levelset_checkerboard(h, w);
 
-///-- Split the channels
+//-- Split the channels
   std::vector<cv::Mat> channels;
   channels.reserve(nof_channels);
   cv::split(img, channels);
 
-///-- Find intensity sum and derive the stopping condition
+//-- Find intensity sum and derive the stopping condition
   cv::Mat intensity_avg = cv::Mat(h, w, CV_64FC1, cv::Scalar::all(0));
   for(int k = 0; k < nof_channels; ++k)
   {
@@ -766,43 +806,43 @@ main(int argc,
   double stop_cond = tol * cv::norm(intensity_avg, cv::NORM_L2);
   intensity_avg.release();
 
-///-- Timestep loop
+//-- Timestep loop
   for(int t = 0; t < max_steps; ++t)
   {
     cv::Mat u_diff(cv::Mat::zeros(h, w, CV_64FC1));
 
-///-- Channel loop
+//-- Channel loop
     for(int k = 0; k < nof_channels; ++k)
     {
       cv::Mat channel = channels[k];
-///-- Find the average regional variances
+//-- Find the average regional variances
       const double c1 = region_variance(channel, u, h, w, Region::Inside, heaviside);
       const double c2 = region_variance(channel, u, h, w, Region::Outside, heaviside);
 
-///-- Calculate the contribution of one channel to the level set
+//-- Calculate the contribution of one channel to the level set
       const cv::Mat variance_inside = variance_penalty(channel, h, w, c1, lambda1[k]);
       const cv::Mat variance_outside = variance_penalty(channel, h, w, c2, lambda2[k]);
       u_diff += -variance_inside + variance_outside;
     }
-///-- Calculate the curvature (divergence of normalized gradient)
+//-- Calculate the curvature (divergence of normalized gradient)
     const cv::Mat kappa = curvature(u, h, w, kernels);
 
-///-- Mash the terms together
+//-- Mash the terms together
     u_diff /= nof_channels;
     u_diff -= nu;
     kappa *= mu;
     u_diff += kappa;
     u_diff *= dt;
 
-///-- Run delta function on the level set
+//-- Run delta function on the level set
     cv::Mat u_cp = u.clone();
     cv::parallel_for_(cv::Range(0, h * w), ParallelPixelFunction(u_cp, w, delta));
 
-///-- Shift the level set
+//-- Shift the level set
     cv::multiply(u_diff, u_cp, u_diff);
     u += u_diff;
 
-///-- Save the frame
+//-- Save the frame
     if(write_video)
     {
       cv::Mat nw_img = img.clone();
@@ -818,18 +858,18 @@ main(int argc,
       vw.write(nw_img);
     }
 
-///-- Check if we have achieved the desired precision
+//-- Check if we have achieved the desired precision
     const double u_diff_norm = cv::norm(u_diff, cv::NORM_L2);
     if(u_diff_norm <= stop_cond) break;
 
-///-- Reinitialize the contour
+//-- Reinitialize the contour
     if( t + 1 % reinit_interval)
     {
       // implement me
     }
   }
 
-///-- Select the region enclosed by the contour and save it to the disk
+//-- Select the region enclosed by the contour and save it to the disk
   if(object_selection)
     cv::imwrite(add_suffix(input_filename, "selection"), separate(img, u, invert));
 
