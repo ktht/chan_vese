@@ -675,8 +675,6 @@ main(int argc,
       msg_exit("Error: file \"" + input_filename + "\" does not exists!");
     if(vm.count("dt") && dt <= 0)
       msg_exit("Cannot have negative or zero timestep: " + std::to_string(dt) + ".");
-    if(vm.count("reinit-interval") && reinit_interval <= 0)
-      msg_exit("Reinitialization interval must be positive.");
     if(vm.count("lambda1"))
     {
       if(grayscale && lambda1.size() != 1)
@@ -863,7 +861,7 @@ main(int argc,
     if(u_diff_norm <= stop_cond) break;
 
 //-- Reinitialize the contour
-    if( t + 1 % reinit_interval)
+    if(reinit_interval > 0 && t + 1 % reinit_interval)
     {
       // implement me
     }
