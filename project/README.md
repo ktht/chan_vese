@@ -16,8 +16,6 @@ The compiler must be compatible with the latest C++14 standard (clang 3.6 or gcc
 - explain here what Chan-Vese is all about
 - add level set reinitialization
 - let the user specify the initial contour
-- parallelize trivial tasks
-- refactor a little bit
 
 ### Preliminary results
 

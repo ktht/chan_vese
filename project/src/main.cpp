@@ -61,7 +61,6 @@
  *       - add an option to specify the initial contour from command line OR
  *         add capability to set the contour by clicking twice on the image (rectangle/circle)
  *       - add level set reinitialization
- *       - refactor code (create CustomVideoWriter and CustomScreenWriter classes)
  * @mainpage
  * @section intro_sec Introduction
  * This is the implementation of Chan-Sandberg-Vese segmentation algorithm in C++.
@@ -105,31 +104,18 @@ const cv::Scalar Colors::green = CV_RGB(  0, 255,   0);
 const cv::Scalar Colors::blue  = CV_RGB(  0,   0, 255);
 
 /**
- * @brief Finite difference kernels
- * @sa curvature
+ * @brief Class for holding basic parameters of a font
  */
-struct Kernel
+class FontParameters
 {
-  static const cv::Mat fwd_x; ///< Forward difference in the x direction, @f$\Delta_x^+=f_{i+1,j}-f_{i,j}@f$
-  static const cv::Mat fwd_y; ///< Forward difference in the y direction, @f$\Delta_y^+=f_{i,j+1}-f_{i,j}@f$
-  static const cv::Mat bwd_x; ///< Backward difference in the x direction, @f$\Delta_x^-=f_{i,j}-f_{i-1,j}@f$
-  static const cv::Mat bwd_y; ///< Backward difference in the y direction, @f$\Delta_y^-=f_{i,j}-f_{i,j-1}@f$
-  static const cv::Mat ctr_x; ///< Central difference in the x direction, @f$\Delta_x^0=\frac{f_{i+1,j}-f_{i-1,j}}{2}@f$
-  static const cv::Mat ctr_y; ///< Central difference in the y direction, @f$\Delta_y^0=\frac{f_{i,j+1}-f_{i,j-1}}{2}@f$
-};
-
-const cv::Mat Kernel::fwd_x = (cv::Mat_<double>(1, 3) << 0,-1,1);
-const cv::Mat Kernel::fwd_y = (cv::Mat_<double>(3, 1) << 0,-1,1);
-const cv::Mat Kernel::bwd_x = (cv::Mat_<double>(1, 3) << -1,1,0);
-const cv::Mat Kernel::bwd_y = (cv::Mat_<double>(3, 1) << -1,1,0);
-const cv::Mat Kernel::ctr_x = (cv::Mat_<double>(1, 3) << -0.5,0,0.5);
-const cv::Mat Kernel::ctr_y = (cv::Mat_<double>(3, 1) << -0.5,0,0.5);
-
-/**
- * @brief Struct for holding basic parameters of a font
- */
-struct FontParameters
-{
+public:
+  FontParameters()
+    : face(CV_FONT_HERSHEY_PLAIN)
+    , scale(0.8)
+    , thickness(1)
+    , type(CV_AA)
+    , baseline(0)
+  {}
   /**
    * @brief FontParameters constructor
    * @param font_face      Font (type)face, expecting CV_FONT_HERSHEY_*
@@ -150,12 +136,33 @@ struct FontParameters
     , type(font_linetype)
     , baseline(font_baseline)
   {}
-  const int face;      ///< Font (type)face
-  const double scale;  ///< Font size (relative; multiplied with base font size)
-  const int thickness; ///< Font thickness
-  const int type;      ///< Font line type
-  int baseline;        ///< Bottom padding in y-direction?
+  int face;      ///< Font (type)face
+  double scale;  ///< Font size (relative; multiplied with base font size)
+  int thickness; ///< Font thickness
+  int type;      ///< Font line type
+  int baseline;  ///< Bottom padding in y-direction?
 };
+
+/**
+ * @brief Finite difference kernels
+ * @sa curvature
+ */
+struct Kernel
+{
+  static const cv::Mat fwd_x; ///< Forward difference in the x direction, @f$\Delta_x^+=f_{i+1,j}-f_{i,j}@f$
+  static const cv::Mat fwd_y; ///< Forward difference in the y direction, @f$\Delta_y^+=f_{i,j+1}-f_{i,j}@f$
+  static const cv::Mat bwd_x; ///< Backward difference in the x direction, @f$\Delta_x^-=f_{i,j}-f_{i-1,j}@f$
+  static const cv::Mat bwd_y; ///< Backward difference in the y direction, @f$\Delta_y^-=f_{i,j}-f_{i,j-1}@f$
+  static const cv::Mat ctr_x; ///< Central difference in the x direction, @f$\Delta_x^0=\frac{f_{i+1,j}-f_{i-1,j}}{2}@f$
+  static const cv::Mat ctr_y; ///< Central difference in the y direction, @f$\Delta_y^0=\frac{f_{i,j+1}-f_{i,j-1}}{2}@f$
+};
+
+const cv::Mat Kernel::fwd_x = (cv::Mat_<double>(1, 3) << 0,-1,1);
+const cv::Mat Kernel::fwd_y = (cv::Mat_<double>(3, 1) << 0,-1,1);
+const cv::Mat Kernel::bwd_x = (cv::Mat_<double>(1, 3) << -1,1,0);
+const cv::Mat Kernel::bwd_y = (cv::Mat_<double>(3, 1) << -1,1,0);
+const cv::Mat Kernel::ctr_x = (cv::Mat_<double>(1, 3) << -0.5,0,0.5);
+const cv::Mat Kernel::ctr_y = (cv::Mat_<double>(3, 1) << -0.5,0,0.5);
 
 /**
  * @brief Class for calculating function values on the level set in parallel.
@@ -193,6 +200,154 @@ private:
   cv::Mat & data;
   const int w;
   const std::function<double(double)> func;
+};
+
+/**
+ * @brief A wrapper for cv::VideoWriter
+ *        Holds information about underlying image, optional overlay text position,
+ *        contour colors and frame rate
+ */
+class VideoWriterManager
+{
+public:
+  VideoWriterManager() = default;
+  /**
+   * @brief VideoWriterManager constructor
+   *        Needs minimum information to create a video file
+   * @param input_filename  File name of the original image, the file extension of which
+   *                        will be renamed to '.avi'
+   * @param _img            Underlying image
+   * @param _contour_color  Color of the contour
+   * @param fps             Frame rate (frames per second)
+   * @param _pos            Overlay text position
+   * @param _enable_overlay Enables text overlay
+   * @sa TextPosition
+   */
+  VideoWriterManager(const std::string & input_filename,
+                     const cv::Mat & _img,
+                     const cv::Scalar & _contour_color,
+                     double fps,
+                     TextPosition _pos,
+                     bool _enable_overlay)
+    : img(_img)
+    , contour_color(_contour_color)
+    , font({CV_FONT_HERSHEY_PLAIN, 0.8, 1, 0, CV_AA})
+    , pos(_pos)
+    , enable_overlay(_enable_overlay)
+  {
+    const std::string video_filename = boost::filesystem::change_extension(input_filename, "avi").string();
+    vw = cv::VideoWriter(video_filename, CV_FOURCC('X','V','I','D'), fps, img.size());
+  }
+  /**
+   * @brief Writes the frame with a given zero level set to a video file
+   * @param u            Level set
+   * @param overlay_text Optional overlay text
+   */
+  void
+  write_frame(const cv::Mat & u,
+              const std::string & overlay_text = "")
+  {
+    cv::Mat nw_img = img.clone();
+    draw_contour(nw_img, u);
+    if(enable_overlay)
+    {
+      cv::Scalar color;
+      cv::Point p;
+      overlay_color(overlay_text, color, p);
+      cv::putText(nw_img, overlay_text, p, font.face, font.scale, color, font.thickness, font.type);
+    }
+    vw.write(nw_img);
+  }
+
+private:
+  cv::VideoWriter vw;
+  cv::Mat img;
+  cv::Scalar contour_color;
+  FontParameters font;
+  TextPosition pos;
+  bool enable_overlay;
+
+  /**
+   * @brief Draws the zero level set on a given image
+   * @param dst        The image where the contour is placed.
+   * @param u          The level set, the zero level of which is plotted.
+   * @param line_color Contour line color
+   * @return 0
+   * @sa levelset2contour
+   */
+  int
+  draw_contour(cv::Mat & dst,
+               const cv::Mat & u)
+  {
+    cv::Mat mask(img.size(), CV_8UC1);
+    std::vector<std::vector<cv::Point>> cs;
+    std::vector<cv::Vec4i> hier;
+
+    cv::Mat u_cp(u.size(), CV_8UC1);
+    u.convertTo(u_cp, u_cp.type());
+    cv::threshold(u_cp, mask, 0, 1, cv::THRESH_BINARY);
+    cv::findContours(mask, cs, hier, CV_RETR_TREE, CV_CHAIN_APPROX_SIMPLE);
+
+    int idx = 0;
+    for(; idx >= 0; idx = hier[idx][0])
+      cv::drawContours(dst, cs, idx, contour_color, 1, 8, hier);
+
+    return 0;
+  }
+  /**
+   * @brief Finds proper font color for overlay text
+   *        The color is determined by the average intensity of the ROI where
+   *        the text is placed. The function also finds correct bottom left point
+   *        of the text area
+   * @param img    3-channel image where the text is placed
+   * @param txt    The text itself
+   * @param pos    Position in the image (for possibilities: top left corner,
+   *               top right, bottom left or bottom right)
+   * @param fparam Font parameters that help to determine the dimensions of ROI
+   * @param color  Reference to the color variable
+   * @param p      Reference to the bottom left point of the text area
+   * @return Black color, if the background is white enough; otherwise white color
+   * @todo add some check if the text width/height exceeds image dimensions
+   * @sa TextPosition, FontParameters
+   */
+  int
+  overlay_color(const std::string txt,
+                cv::Scalar & color,
+                cv::Point & p)
+  {
+
+    const int threshold = 105; // bias towards black font
+
+    const cv::Size txt_sz = cv::getTextSize(txt, font.face, font.scale, font.thickness, &font.baseline);
+    const int padding = 5;
+    cv::Point q;
+
+    if(pos == TextPosition::TopLeft)
+    {
+      p = cv::Point(padding, padding + txt_sz.height);
+      q = cv::Point(padding, padding);
+    }
+    else if(pos == TextPosition::TopRight)
+    {
+      p = cv::Point(img.cols - padding - txt_sz.width, padding + txt_sz.height);
+      q = cv::Point(img.cols - padding - txt_sz.width, padding);
+    }
+    else if(pos == TextPosition::BottomLeft)
+    {
+      p = cv::Point(padding, img.rows - padding);
+      q = cv::Point(padding, img.rows - padding - txt_sz.height);
+    }
+    else if(pos == TextPosition::BottomRight)
+    {
+      p = cv::Point(img.cols - padding - txt_sz.width, img.rows - padding);
+      q = cv::Point(img.cols - padding - txt_sz.width, img.rows - padding - txt_sz.height);
+    }
+
+    cv::Scalar avgs = cv::mean(img(cv::Rect(q, txt_sz)));
+    const double intensity_avg = 0.114*avgs[0] + 0.587*avgs[1] + 0.299*avgs[2];
+    color = 255 - intensity_avg < threshold ? Colors::black : Colors::white;
+    return 0;
+  }
 };
 
 /**
@@ -358,116 +513,6 @@ levelset_checkerboard(int h,
       u.at<double>(i, j) = (boost::math::sign(std::sin(pi * i / 5) *
                                               std::sin(pi * j / 5)));
   return u;
-}
-
-/**
- * @brief Creates a contour from the level set.
- *        In the contour matrix, the negative values are replaced by 0,
- *        whereas the positive values are replaced by 255.
- *        This convention is kept in mind later on.
- * @param u Level set
- * @return Contour
- * @sa draw_contour
- */
-cv::Mat
-levelset2contour(const cv::Mat & u)
-{
-  const int h = u.rows;
-  const int w = u.cols;
-  cv::Mat c(h, w, CV_8UC1);
-
-  for(int i = 0; i < h; ++i)
-    for(int j = 0; j < w; ++j)
-      c.at<uchar>(i, j) = u.at<double>(i, j) <= 0 ? 0 : 255;
-
-  return c;
-}
-
-/**
- * @brief Draws the zero level set on a given image
- * @param dst        The image where the contour is placed.
- * @param u          The level set, the zero level of which is plotted.
- * @param line_color Contour line color
- * @return 0
- * @sa levelset2contour
- */
-int
-draw_contour(cv::Mat & dst,
-             const cv::Mat & u,
-             const cv::Scalar & line_color)
-{
-  cv::Mat th;
-  std::vector<std::vector<cv::Point>> cs;
-  std::vector<cv::Vec4i> hier;
-
-  cv::Mat c = levelset2contour(u);
-  cv::threshold(c, th, 100, 255, cv::THRESH_BINARY);
-  cv::findContours(th, cs, hier, CV_RETR_TREE, CV_CHAIN_APPROX_SIMPLE);
-
-  int idx = 0;
-  for(; idx >= 0; idx = hier[idx][0])
-  {
-    cv::drawContours(dst, cs, idx, line_color, 1, 8, hier);
-  }
-
-  return 0;
-}
-
-/**
- * @brief Finds proper font color for overlay text
- *        The color is determined by the average intensity of the ROI where
- *        the text is placed
- * @param img    3-channel image where the text is placed
- * @param txt    The text itself
- * @param pos    Position in the image (for possibilities: top left corner,
- *               top right, bottom left or bottom right)
- * @param fparam Font parameters that help to determine the dimensions of ROI
- * @param color  Reference to the color variable
- * @param p      Reference to the bottom left point of the text area
- * @return Black color, if the background is white enough; otherwise white color
- * @todo add some check if the text width/height exceeds image dimensions
- * @sa TextPosition, FontParameters
- */
-int
-overlay_color(const cv::Mat & img,
-              const std::string txt,
-              TextPosition pos,
-              FontParameters & fparam,
-              cv::Scalar & color,
-              cv::Point & p)
-{
-
-  const int threshold = 105; // bias towards black font
-
-  const cv::Size txt_sz = cv::getTextSize(txt, fparam.face, fparam.scale, fparam.thickness, &fparam.baseline);
-  const int padding = 5;
-  cv::Point q;
-
-  if(pos == TextPosition::TopLeft)
-  {
-    p = cv::Point(padding, padding + txt_sz.height);
-    q = cv::Point(padding, padding);
-  }
-  else if(pos == TextPosition::TopRight)
-  {
-    p = cv::Point(img.cols - padding - txt_sz.width, padding + txt_sz.height);
-    q = cv::Point(img.cols - padding - txt_sz.width, padding);
-  }
-  else if(pos == TextPosition::BottomLeft)
-  {
-    p = cv::Point(padding, img.rows - padding);
-    q = cv::Point(padding, img.rows - padding - txt_sz.height);
-  }
-  else if(pos == TextPosition::BottomRight)
-  {
-    p = cv::Point(img.cols - padding - txt_sz.width, img.rows - padding);
-    q = cv::Point(img.cols - padding - txt_sz.width, img.rows - padding - txt_sz.height);
-  }
-
-  cv::Scalar avgs = cv::mean(img(cv::Rect(q, txt_sz)));
-  const double intensity_avg = 0.114*avgs[0] + 0.587*avgs[1] + 0.299*avgs[2];
-  color = 255 - intensity_avg < threshold ? Colors::black : Colors::white;
-  return 0;
 }
 
 /**
@@ -782,16 +827,10 @@ main(int argc,
   const auto heaviside = std::bind(regularized_heaviside, std::placeholders::_1, eps);
   const auto delta = std::bind(regularized_delta, std::placeholders::_1, eps);
 
-//-- Set up overlay font
-  FontParameters fparam(CV_FONT_HERSHEY_PLAIN, 0.8, 1, 0, CV_AA);
-
 //-- Set up the video writer
-  cv::VideoWriter vw;
+  VideoWriterManager vwm;
   if(write_video)
-  {
-    const std::string video_filename = boost::filesystem::change_extension(input_filename, "avi").string();
-    vw = cv::VideoWriter(video_filename, CV_FOURCC('X','V','I','D'), fps, img.size());
-  }
+    vwm = VideoWriterManager(input_filename, img, contour_color, fps, pos, overlay_text);
 
 //-- Construct the level set
   cv::Mat u = levelset_checkerboard(h, w);
@@ -813,6 +852,7 @@ main(int argc,
   double stop_cond = tol * cv::norm(intensity_avg, cv::NORM_L2);
   intensity_avg.release();
 
+//-- Open ncurses
   if(verbose) initscr();
   double u_diff_avg = 0;
 
@@ -885,20 +925,7 @@ main(int argc,
     }
 
 //-- Save the frame
-    if(write_video)
-    {
-      cv::Mat nw_img = img.clone();
-      draw_contour(nw_img, u, contour_color);
-      if(overlay_text)
-      {
-        const std::string txt = "time = " + std::to_string(t);
-        cv::Scalar color;
-        cv::Point p;
-        overlay_color(img, txt, pos, fparam, color, p);
-        cv::putText(nw_img, txt, p, fparam.face, fparam.scale, color, fparam.thickness, fparam.type);
-      }
-      vw.write(nw_img);
-    }
+    if(write_video) vwm.write_frame(u, overlay_text ? "t = " + std::to_string(t) : "");
 
 //-- Check if we have achieved the desired precision
     if(u_diff_norm <= stop_cond) break;
@@ -910,6 +937,7 @@ main(int argc,
     }
   }
 
+//-- Close ncurses
   if(verbose) endwin();
 
 //-- Select the region enclosed by the contour and save it to the disk
