@@ -202,7 +202,7 @@ get_terminal_width()
  * @param eps Smoothing parameter, @f$\epsilon@f$
  * @return Value of the step function at @f$x@f$
  */
-constexpr double
+double
 regularized_heaviside(double x,
                       double eps = 1)
 {

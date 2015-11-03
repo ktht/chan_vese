@@ -18,6 +18,7 @@ DEP_PATH      = dep
 BIN_PATH      = bin
 TEST_PATH     = test
 TEST_BIN_PATH = $(BIN_PATH)/$(TEST_PATH)
+DOC_DIR       = doc/html
 
 INCLUDES = -I$(INCLUDE_PATH) \
            -I$(BOOST_PATH)/include
@@ -68,7 +69,10 @@ ifneq ($(MAKECMDGOALS),clean)
   endif
 endif
 
-.PHONY: clean
+doc:
+	doxygen Doxyfile
+
+.PHONY: clean doc
 
 clean:
-	@rm -rf $(OBJ_PATH) $(BIN_PATH) $(DEP_PATH) $(PYTHON_PATH)/*.pyc
+	@rm -rf $(OBJ_PATH) $(BIN_PATH) $(DEP_PATH) $(DOC_DIR)
