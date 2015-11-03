@@ -19,5 +19,6 @@ The compiler must be compatible with the latest C++14 standard (clang 3.6 or gcc
 
 ### Preliminary results
 
-After 10 iterations with ![mu=0.1](http://www.sciweavers.org/tex2img.php?eq=%5Cmu%3D0.1&bc=White&fc=Black&im=jpg&fs=8&ff=arev&edit=).
+After 10 iterations with mu=0.1.
+
 ![comparison](https://cloud.githubusercontent.com/assets/6233872/10898328/04b6bcfc-81d2-11e5-8672-7974c3fd1366.png)
