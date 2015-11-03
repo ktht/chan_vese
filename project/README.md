@@ -7,6 +7,7 @@ This is a quick implementation of Chan-Vese segmentation in C++.
 Implementation relies on (version number the code was tested with)
 - OpenCV (2.4.8)
 - Boost libraries (1.59.0)
+- ncurses (5.9.20140118; UNIX) / PDcurses (untested; Windows)
 
 The compiler must be compatible with the latest C++14 standard (clang 3.6 or gcc 5.0 will do ok).
 
@@ -14,9 +15,9 @@ The compiler must be compatible with the latest C++14 standard (clang 3.6 or gcc
 
 - explain here what Chan-Vese is all about
 - add level set reinitialization
-- add verbose output showing the progress
 - let the user specify the initial contour
 - parallelize trivial tasks
+- refactor a little bit
 
 ### Preliminary results
 

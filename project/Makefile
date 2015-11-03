@@ -30,6 +30,17 @@ LIBS     = -lopencv_core \
            -lboost_system \
            -lboost_filesystem
 
+ifeq ($(OS),Windows_NT)
+  LIBS     += -lpdcurses
+else
+  UNAME_S = $(shell uname -s)
+  ifeq ($(UNAME_S),$(filter $(UNAME_S),Linux Darwin))
+    LIBS     += -lncurses
+  else
+    $(error Unsupported architecture)
+  endif
+endif
+
 SRCS      = main.cpp
 TEST      =
 OBJS      = $(SRCS:%.cpp=$(OBJ_PATH)/%.o)
@@ -69,10 +80,10 @@ ifneq ($(MAKECMDGOALS),clean)
   endif
 endif
 
-doc:
-	doxygen Doxyfile
-
 .PHONY: clean doc
+
+doc:
+	@$(shell doxygen Doxyfile)
 
 clean:
 	@rm -rf $(OBJ_PATH) $(BIN_PATH) $(DEP_PATH) $(DOC_DIR)

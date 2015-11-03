@@ -1,7 +1,7 @@
 #include <iostream> // std::cout, std::cerr
 #include <cstdlib> // EXIT_SUCCESS, EXIT_FAILURE
 #include <vector> // std::vector<>
-#include <algorithm> // std::min()
+#include <algorithm> // std::min(), std::max()
 #include <cmath> // std::pow(), std::sqrt(), std::sin(), std::atan()
 #include <exception> // std::exception
 #include <string> // std::string, std::to_string()
@@ -21,6 +21,7 @@
 
 #include <boost/math/special_functions/sign.hpp> // boost::math::sign()
 #include <boost/algorithm/string/predicate.hpp> // boost::iequals()
+#include <boost/algorithm/string/join.hpp> // boost::algorithm::join()
 
 #if defined(__gnu_linux__)
 #pragma GCC diagnostic push
@@ -48,8 +49,10 @@
 
 #if defined(_WIN32)
 #include <windows.h> // CONSOLE_SCREEN_BUFFER_INFO, GetConsoleScreenBufferInfo, GetStdHandle, STD_OUTPUT_HANDLE
+#include <curses.h>
 #elif defined(__unix__)
 #include <sys/ioctl.h> // struct winsize, ioctl(), TIOCGWINSZ
+#include <ncurses.h> // initscr(), printw(), refresh(), endwin()
 #endif
 
 /**
@@ -59,8 +62,8 @@
  *         add capability to set the contour by clicking twice on the image (rectangle/circle)
  *       - figure out how to parallelize convolution (it has to be possible if the input
  *         and output images are different)
- *       - print progress (e.g. average variances, L2 norm of differential level set etc)
  *       - add level set reinitialization
+ *       - refactor code (create CustomVideoWriter and CustomScreenWriter classes)
  * @mainpage
  * @section intro_sec Introduction
  * This is the implementation of Chan-Sandberg-Vese segmentation algorithm in C++.
@@ -804,10 +807,18 @@ main(int argc,
   double stop_cond = tol * cv::norm(intensity_avg, cv::NORM_L2);
   intensity_avg.release();
 
+  if(verbose) initscr();
+  double u_diff_avg = 0;
+
 //-- Timestep loop
-  for(int t = 0; t < max_steps; ++t)
+  for(int t = 1; t <= max_steps; ++t)
   {
     cv::Mat u_diff(cv::Mat::zeros(h, w, CV_64FC1));
+
+//-- For statistics
+    std::vector<std::string> c1s, c2s;
+    c1s.reserve(nof_channels);
+    c2s.reserve(nof_channels);
 
 //-- Channel loop
     for(int k = 0; k < nof_channels; ++k)
@@ -816,6 +827,9 @@ main(int argc,
 //-- Find the average regional variances
       const double c1 = region_variance(channel, u, h, w, Region::Inside, heaviside);
       const double c2 = region_variance(channel, u, h, w, Region::Outside, heaviside);
+
+      c1s.push_back(std::to_string(c1));
+      c2s.push_back(std::to_string(c2));
 
 //-- Calculate the contribution of one channel to the level set
       const cv::Mat variance_inside = variance_penalty(channel, h, w, c1, lambda1[k]);
@@ -838,7 +852,31 @@ main(int argc,
 
 //-- Shift the level set
     cv::multiply(u_diff, u_cp, u_diff);
+    const double u_diff_norm = cv::norm(u_diff, cv::NORM_L2);
     u += u_diff;
+
+//-- Print statistics
+    if(verbose)
+    {
+      u_diff_avg += (u_diff_norm - u_diff_avg) / t;
+      clear();
+      printw("\n\nInput: %s\n\n", input_filename.c_str());
+      if(max_steps != std::numeric_limits<int>::max())
+        printw("\tCompleted: %f%%\n", static_cast<double>(t) / max_steps * 100);
+      printw("\ti (i * dt)   = %d (%f)\n", t, t * dt);
+      if(grayscale)
+      {
+        printw("\tc1           = %f\n", c1s[0]);
+        printw("\tc2           = %f\n", c2s[0]);
+      }
+      else
+      {
+        printw("\tc1 (R, G, B) = %s\n", boost::algorithm::join(c1s, ", ").c_str());
+        printw("\tc2 (R, G, B) = %s\n", boost::algorithm::join(c2s, ", ").c_str());
+      }
+      printw("\tu_diff (avg) = %f (%f)\n", u_diff_norm, u_diff_avg);
+      refresh();
+    }
 
 //-- Save the frame
     if(write_video)
@@ -857,15 +895,16 @@ main(int argc,
     }
 
 //-- Check if we have achieved the desired precision
-    const double u_diff_norm = cv::norm(u_diff, cv::NORM_L2);
     if(u_diff_norm <= stop_cond) break;
 
 //-- Reinitialize the contour
-    if(reinit_interval > 0 && t + 1 % reinit_interval)
+    if(reinit_interval > 0 && t % reinit_interval)
     {
       // implement me
     }
   }
+
+  if(verbose) endwin();
 
 //-- Select the region enclosed by the contour and save it to the disk
   if(object_selection)
