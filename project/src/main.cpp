@@ -58,6 +58,7 @@
 /**
  * @file
  * @todo
+ *       - try to make Perona-Malik faster; also add it to verbose mode
  *       - add an option to specify the initial contour from command line OR
  *         add capability to set the contour by clicking twice on the image (rectangle/circle)
  *       - add level set reinitialization
@@ -672,15 +673,101 @@ separate(const cv::Mat & img,
   return selection;
 }
 
+/**
+ * @brief perona_malik
+ * @param channels
+ * @param h
+ * @param w
+ * @param K
+ * @param L
+ * @param T
+ * @return
+ */
+cv::Mat
+perona_malik(const std::vector<cv::Mat> & channels,
+             int h,
+             int w,
+             double K,
+             double L,
+             double T)
+{
+  const int nof_channels = channels.size();
+  std::vector<cv::Mat> smoothed_channels;
+  smoothed_channels.reserve(nof_channels);
+
+  for(int k = 0; k < nof_channels; ++k)
+  {
+    cv::Mat x0, x1, xc;
+    channels[k].copyTo(x0);
+    x0.convertTo(x0, CV_64FC1);
+
+    double t = 0;
+
+    for (double t = 0; t < T; t += L)
+    {
+      cv::Mat g, dx, dy;
+      cv::Sobel(x0, dx, CV_64FC1, 1, 0, 3);
+      cv::Sobel(x0, dy, CV_64FC1, 0, 1, 3);
+      g = cv::Mat::zeros(h, w, CV_64FC1);
+
+      for (int i = 0; i < h; ++i)
+        for (int j = 0; j < w; ++j)
+        {
+            const double gx = dx.at<double>(i, j);
+            const double gy = dy.at<double>(i, j);
+            const double d = i == 0 || i == h - 1 || j == 0 || j == w - 1 ?
+                             1 :
+                             std::pow(1.0 + (std::pow(gx, 2) + std::pow(gy, 2)) / (std::pow(K, 2)), -1);
+            g.at<double>(i, j) = d;
+       }
+
+      x1 = cv::Mat::zeros(h, w, CV_64F);
+      for (int i = 0; i < h; ++i)
+        for (int j = 0; j < w; ++j)
+        {
+          const int in = i == h - 1 ? i : i + 1;
+          const int ip = i == 0     ? i : i - 1;
+          const int jn = j == w - 1 ? j : j + 1;
+          const int jp = j == 0     ? j : j - 1;
+
+          const double Is = x0.at<double>(in, j );
+          const double Ie = x0.at<double>(i,  jn);
+          const double In = x0.at<double>(ip, j );
+          const double Iw = x0.at<double>(i,  jp);
+          const double I0 = x0.at<double>(i,  j );
+
+          const double cs = g.at<double>(in, j );
+          const double ce = g.at<double>(i,  jn);
+          const double cn = g.at<double>(ip, j );
+          const double cw = g.at<double>(i,  jp);
+          const double c0 = g.at<double>(i,  j );
+
+          x1.at<double>(i, j) = I0 + L * ((cs + c0) * (Is - I0) +
+                                          (ce + c0) * (Ie - I0) +
+                                          (cn + c0) * (In - I0) +
+                                          (cw + c0) * (Iw - I0) ) / 4;
+        }
+
+      x1.copyTo(x0);
+      x0.convertTo(xc, CV_8UC1);
+    }
+
+    smoothed_channels.push_back(xc);
+  }
+  cv::Mat smoothed_img;
+  cv::merge(smoothed_channels, smoothed_img);
+
+  return smoothed_img;
+}
+
 int
 main(int argc,
      char ** argv)
 {
 /// Performs Chan-Vese segmentation on a given input image
 
-  double mu, nu, eps, tol, dt, fps;
-  int max_steps,
-      reinit_interval;
+  double mu, nu, eps, tol, dt, fps, K, L, T;
+  int max_steps;
   std::vector<double> lambda1,
                       lambda2;
   std::string input_filename,
@@ -691,7 +778,8 @@ main(int argc,
        overlay_text     = false,
        object_selection = false,
        invert           = false,
-       verbose          = false;
+       verbose          = false,
+       segment          = false;
   TextPosition pos = TextPosition::TopLeft;
   cv::Scalar contour_color = Colors::blue;
 
@@ -708,7 +796,6 @@ main(int argc,
       ("mu",                 po::value<double>(&mu) -> default_value(0.5),                     "length penalty parameter")
       ("nu",                 po::value<double>(&nu) -> default_value(0),                       "area penalty parameter")
       ("dt",                 po::value<double>(&dt) -> default_value(1),                       "timestep")
-      ("reinit-interval,r",  po::value<int>(&reinit_interval) -> default_value(-1),            "reinitialization interval (it also enables reinitialization")
       ("lambda1",            po::value<std::vector<double>>(&lambda1) -> multitoken(),         "penalty of variance inside the contour (default: 1's)")
       ("lambda2",            po::value<std::vector<double>>(&lambda2) -> multitoken(),         "penalty of variance outside the contour (default: 1's)")
       ("epsilon,e",          po::value<double>(&eps) -> default_value(1),                      "smoothing parameter in Heaviside/delta")
@@ -717,12 +804,16 @@ main(int argc,
       ("fps,f",              po::value<double>(&fps) -> default_value(10),                     "video fps")
       ("overlay-pos,P",      po::value<std::string>(&text_position) -> default_value("TL"),    "overlay tex position; allowed only: TL, BL, TR, BR")
       ("line-color,l",       po::value<std::string>(&line_color_str) -> default_value("blue"), "contour color (allowed only: red, green, blue, black, white)")
-      ("verbose,v",          po::bool_switch(&verbose),                                        "verbose mode")
+      ("edge-coef,K",        po::value<double>(&K) -> default_value(10),                       "coefficient for enhancing edge detection in Perona-Malik")
+      ("laplacian-coef,L",   po::value<double>(&L) -> default_value(0.25),                     "coefficient in the Laplacian FD scheme of Perona-Malik (must be [0, 1/4])")
+      ("segment-time,T",     po::value<double>(&T) -> default_value(20),                       "number of smoothing steps in Perona-Malik")
+      ("segment,S",          po::bool_switch(&segment),                                        "segment the image with Perona-Malik beforehand")
       ("grayscale,g",        po::bool_switch(&grayscale),                                      "read in as grayscale")
       ("video,V",            po::bool_switch(&write_video),                                    "enable video output (changes the extension to '.avi')")
       ("overlay-text,O",     po::bool_switch(&overlay_text),                                   "add overlay text")
       ("invert-selection,I", po::bool_switch(&invert),                                         "invert selected region (see: select)")
       ("select,s",           po::bool_switch(&object_selection),                               "separate the region encolosed by the contour (adds suffix '_selection')")
+      ("verbose,v",          po::bool_switch(&verbose),                                        "verbose mode")
     ;
     po::variables_map vm;
     po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
@@ -800,6 +891,11 @@ main(int argc,
         msg_exit("Invalid contour color requested.\n"\
                  "Correct values are: red, green, blue, black, white.");
     }
+    if(vm.count("laplacian-coef") && (L > 0.25 || L < 0))
+      msg_exit("The Laplacian coefficient in Perona-Malik segmentation must be between 0 and 0.25.");
+    if(vm.count("segment-time") && (T < L))
+      msg_exit("The segmentation duration must exceed the value of Laplacian coefficient, " +
+               std::to_string(L) + ".");
   }
   catch(std::exception & e)
   {
@@ -839,6 +935,16 @@ main(int argc,
   std::vector<cv::Mat> channels;
   channels.reserve(nof_channels);
   cv::split(img, channels);
+
+//-- Smooth the image with Perona-Malik
+  cv::Mat smoothed_img;
+  if(segment)
+  {
+    smoothed_img = perona_malik(channels, h, w, K, L, T);
+    channels.clear();
+    cv::split(smoothed_img, channels);
+    cv::imwrite(add_suffix(input_filename, "pm"), smoothed_img);
+  }
 
 //-- Find intensity sum and derive the stopping condition
   cv::Mat intensity_avg = cv::Mat(h, w, CV_64FC1, cv::Scalar::all(0));
@@ -929,12 +1035,6 @@ main(int argc,
 
 //-- Check if we have achieved the desired precision
     if(u_diff_norm <= stop_cond) break;
-
-//-- Reinitialize the contour
-    if(reinit_interval > 0 && t % reinit_interval)
-    {
-      // implement me
-    }
   }
 
 //-- Close ncurses
