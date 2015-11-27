@@ -476,6 +476,7 @@ levelset_circ(int h,
               double d)
 {
   cv::Mat u(h, w, CV_64FC1);
+  double * const u_ptr = reinterpret_cast<double *>(u.data);
 
   const int r = std::min(w, h) * d / 2;
   const int mid_x = w / 2;
@@ -486,8 +487,8 @@ levelset_circ(int h,
     {
       const double d = std::sqrt(std::pow(mid_x - i, 2) +
                                  std::pow(mid_y - j, 2));
-      if(d < r) u.at<double>(i, j) = 1;
-      else      u.at<double>(i, j) = -1;
+      if(d < r) u_ptr[i * w + j] = 1;
+      else      u_ptr[i * w + j] = -1;
     }
 
   return u;
@@ -508,10 +509,11 @@ levelset_checkerboard(int h,
 {
   cv::Mat u(h, w, CV_64FC1);
   const double pi = boost::math::constants::pi<double>();
+  double * const u_ptr = reinterpret_cast<double *>(u.data);
   for(int i = 0; i < h; ++i)
     for(int j = 0; j < w; ++j)
-      u.at<double>(i, j) = (boost::math::sign(std::sin(pi * i / 5) *
-                                              std::sin(pi * j / 5)));
+      u_ptr[i * w + j] = (boost::math::sign(std::sin(pi * i / 5) *
+                                            std::sin(pi * j / 5)));
   return u;
 }
 
@@ -630,21 +632,27 @@ curvature(const cv::Mat & u,
   const double eta = 1E-8;
   const double eta2 = std::pow(eta, 2);
   cv::Mat upx (h, w, CV_64FC1), upy (h, w, CV_64FC1),
-          ucx2(h, w, CV_64FC1), ucy2(h, w, CV_64FC1),
-          upx2(h, w, CV_64FC1), upy2(h, w, CV_64FC1),
-          nx  (h, w, CV_64FC1), ny  (h, w, CV_64FC1);
-  cv::filter2D(u, upx,  CV_64FC1, Kernel::fwd_x, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
-  cv::filter2D(u, upy,  CV_64FC1, Kernel::fwd_y, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
-  cv::filter2D(u, ucx2, CV_64FC1, Kernel::ctr_x, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
-  cv::filter2D(u, ucy2, CV_64FC1, Kernel::ctr_y, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
-  cv::pow(ucx2, 2, ucx2);
-  cv::pow(ucy2, 2, ucy2);
-  cv::pow(upx,  2, upx2);
-  cv::pow(upy,  2, upy2);
-  cv::sqrt(upx2 + ucy2 + eta2, nx);
-  cv::sqrt(ucx2 + upy2 + eta2, ny);
-  cv::divide(upx, nx, upx);
-  cv::divide(upy, ny, upy);
+          ucx (h, w, CV_64FC1), ucy (h, w, CV_64FC1);
+  cv::filter2D(u, upx, CV_64FC1, Kernel::fwd_x, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
+  cv::filter2D(u, upy, CV_64FC1, Kernel::fwd_y, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
+  cv::filter2D(u, ucx, CV_64FC1, Kernel::ctr_x, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
+  cv::filter2D(u, ucy, CV_64FC1, Kernel::ctr_y, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
+
+  double * const upx_ptr = reinterpret_cast<double *>(upx.data);
+  double * const upy_ptr = reinterpret_cast<double *>(upy.data);
+  const double * const ucx_ptr = reinterpret_cast<double *>(ucx.data);
+  const double * const ucy_ptr = reinterpret_cast<double *>(ucy.data);
+
+#pragma omp parallel for num_threads(NUM_THREADS)
+  for(int i = 0; i < h; ++i)
+    for(int j = 0; j < w; ++j)
+      {
+        upx_ptr[i * w + j] = upx_ptr[i * w + j] /
+                             std::sqrt(std::pow(upx_ptr[i * w + j], 2) + std::pow(ucx_ptr[i * w + j], 2) + eta2);
+        upy_ptr[i * w + j] = upy_ptr[i * w + j] /
+                             std::sqrt(std::pow(upy_ptr[i * w + j], 2) + std::pow(ucy_ptr[i * w + j], 2) + eta2);
+      }
+
   cv::filter2D(upx, upx, CV_64FC1, Kernel::bwd_x, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
   cv::filter2D(upy, upy, CV_64FC1, Kernel::bwd_y, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
   upx += upy;
@@ -702,7 +710,7 @@ perona_malik(const std::vector<cv::Mat> & channels,
   const int nof_channels = channels.size();
   std::vector<cv::Mat> smoothed_channels(nof_channels);
 
-#pragma omp parallel for num_threads(NUM_THREADS)
+#pragma omp parallel for num_threads(nof_channels)
   for(int k = 0; k < nof_channels; ++k)
   {
     cv::Mat x0(h, w, CV_64FC1),
@@ -950,6 +958,7 @@ main(int argc,
   std::vector<cv::Mat> channels;
   channels.reserve(nof_channels);
   cv::split(img, channels);
+  if(grayscale) channels.erase(channels.begin() + 1, channels.end());
 
 //-- Smooth the image with Perona-Malik
   cv::Mat smoothed_img;
@@ -962,7 +971,8 @@ main(int argc,
   }
 
 //-- Find intensity sum and derive the stopping condition
-  cv::Mat intensity_avg = cv::Mat(h, w, CV_64FC1, cv::Scalar::all(0));
+  cv::Mat intensity_avg = cv::Mat(h, w, CV_64FC1);
+#pragma omp parallel for num_threads(nof_channels)
   for(int k = 0; k < nof_channels; ++k)
   {
     cv::Mat channel(h, w, intensity_avg.type());
@@ -988,6 +998,7 @@ main(int argc,
     c2s.reserve(nof_channels);
 
 //-- Channel loop
+#pragma omp parallel for num_threads(nof_channels)
     for(int k = 0; k < nof_channels; ++k)
     {
       cv::Mat channel = channels[k];
