@@ -58,7 +58,6 @@
 /**
  * @file
  * @todo
- *       - try to make Perona-Malik faster; also add it to verbose mode
  *       - add an option to specify the initial contour from command line OR
  *         add capability to set the contour by clicking twice on the image (rectangle/circle)
  *       - add level set reinitialization
@@ -546,16 +545,21 @@ region_variance(const cv::Mat & img,
 {
   double nom = 0.0,
          denom = 0.0;
-  auto H = (region == Region::Inside)
-             ? heaviside
-             : [&heaviside](double x) -> double { return 1 - heaviside(x); };
+  const auto H = (region == Region::Inside)
+                  ? heaviside
+                  : [&heaviside](double x) -> double { return 1 - heaviside(x); };
+
+  const double * const u_ptr = reinterpret_cast<double *>(u.data);
+  const uchar * const img_ptr = img.data;
+
   for(int i = 0; i < h; ++i)
     for(int j = 0; j < w; ++j)
     {
-      double h = H(u.at<double>(i, j));
-      nom += img.at<uchar>(i, j) * h;
+      const double h = H(u_ptr[i * w + j]);
+      nom += img_ptr[i * w + j] * h;
       denom += h;
     }
+
   return nom / denom;
 }
 
@@ -651,17 +655,21 @@ curvature(const cv::Mat & u,
  * @brief Separates the region enclosed by the contour in the image
  * @param img    Original image
  * @param u      Level set (the zero level of which gives us the region)
+ * @param h      Height of the image
+ * @param w      Width of the image
  * @param invert Invert the selected region
  * @return Image with a white background and the selected object(s) in the foreground
  */
 cv::Mat
 separate(const cv::Mat & img,
          const cv::Mat & u,
+         int h,
+         int w,
          bool invert = false)
 {
-  cv::Mat selection(img.size(), CV_8UC3);
-  cv::Mat mask(img.size(), CV_8U);
-  cv::Mat u_cp(u.size(), CV_32F); // for some reason cv::threshold() works only with 32-bit floats
+  cv::Mat selection(h, w, CV_8UC3);
+  cv::Mat mask(h, w, CV_8U);
+  cv::Mat u_cp(h, w, CV_32F); // for some reason cv::threshold() works only with 32-bit floats
 
   u.convertTo(u_cp, u_cp.type());
   cv::threshold(u_cp, mask, 0, 1, cv::THRESH_BINARY);
@@ -692,67 +700,74 @@ perona_malik(const std::vector<cv::Mat> & channels,
              double T)
 {
   const int nof_channels = channels.size();
-  std::vector<cv::Mat> smoothed_channels;
-  smoothed_channels.reserve(nof_channels);
+  std::vector<cv::Mat> smoothed_channels(nof_channels);
 
+#pragma omp parallel for num_threads(NUM_THREADS)
   for(int k = 0; k < nof_channels; ++k)
   {
-    cv::Mat x0, x1, xc;
+    cv::Mat x0(h, w, CV_64FC1),
+            x1(h, w, CV_64FC1),
+            xc(h, w, CV_8UC1);
     channels[k].copyTo(x0);
     x0.convertTo(x0, CV_64FC1);
 
-    double t = 0;
-
     for (double t = 0; t < T; t += L)
     {
-      cv::Mat g, dx, dy;
+      cv::Mat g(h, w, CV_64FC1),
+              dx(h, w, CV_64FC1),
+              dy(h, w, CV_64FC1);
       cv::Sobel(x0, dx, CV_64FC1, 1, 0, 3);
       cv::Sobel(x0, dy, CV_64FC1, 0, 1, 3);
-      g = cv::Mat::zeros(h, w, CV_64FC1);
+      x1 = cv::Mat::zeros(h, w, CV_64F);
 
-      for (int i = 0; i < h; ++i)
-        for (int j = 0; j < w; ++j)
+      const double * const x0_ptr = reinterpret_cast<double *>(x0.data);
+      const double * const dx_ptr = reinterpret_cast<double *>(dx.data);
+      const double * const dy_ptr = reinterpret_cast<double *>(dy.data);
+      double * const x1_ptr = reinterpret_cast<double *>(x1.data);
+      double * const g_ptr = reinterpret_cast<double *>(g.data);
+
+      for(int i = 0; i < h; ++i)
+        for(int j = 0; j < w; ++j)
         {
-            const double gx = dx.at<double>(i, j);
-            const double gy = dy.at<double>(i, j);
+            const double gx = dx_ptr[i * w + j];
+            const double gy = dy_ptr[i * w + j];
             const double d = i == 0 || i == h - 1 || j == 0 || j == w - 1 ?
                              1 :
                              std::pow(1.0 + (std::pow(gx, 2) + std::pow(gy, 2)) / (std::pow(K, 2)), -1);
-            g.at<double>(i, j) = d;
+            g_ptr[i * w + j] = d;
        }
 
-      x1 = cv::Mat::zeros(h, w, CV_64F);
-      for (int i = 0; i < h; ++i)
-        for (int j = 0; j < w; ++j)
+      for(int i = 0; i < h; ++i)
+        for(int j = 0; j < w; ++j)
         {
           const int in = i == h - 1 ? i : i + 1;
           const int ip = i == 0     ? i : i - 1;
           const int jn = j == w - 1 ? j : j + 1;
           const int jp = j == 0     ? j : j - 1;
 
-          const double Is = x0.at<double>(in, j );
-          const double Ie = x0.at<double>(i,  jn);
-          const double In = x0.at<double>(ip, j );
-          const double Iw = x0.at<double>(i,  jp);
-          const double I0 = x0.at<double>(i,  j );
+          const double Is = x0_ptr[in * w + j ];
+          const double Ie = x0_ptr[i  * w + jn];
+          const double In = x0_ptr[ip * w + j ];
+          const double Iw = x0_ptr[i  * w + jp];
+          const double I0 = x0_ptr[i  * w + j ];
 
-          const double cs = g.at<double>(in, j );
-          const double ce = g.at<double>(i,  jn);
-          const double cn = g.at<double>(ip, j );
-          const double cw = g.at<double>(i,  jp);
-          const double c0 = g.at<double>(i,  j );
+          const double cs = g_ptr[in * w + j ];
+          const double ce = g_ptr[i  * w + jn];
+          const double cn = g_ptr[ip * w + j ];
+          const double cw = g_ptr[i  * w + jp];
+          const double c0 = g_ptr[i  * w + j ];
 
-          x1.at<double>(i, j) = I0 + L * ((cs + c0) * (Is - I0) +
-                                          (ce + c0) * (Ie - I0) +
-                                          (cn + c0) * (In - I0) +
-                                          (cw + c0) * (Iw - I0) ) / 4;
+          x1_ptr[i * w + j] = I0 + L * ((cs + c0) * (Is - I0) +
+                                        (ce + c0) * (Ie - I0) +
+                                        (cn + c0) * (In - I0) +
+                                        (cw + c0) * (Iw - I0) ) / 4;
         }
 
       x1.copyTo(x0);
       x0.convertTo(xc, CV_8UC1);
     }
 
-    smoothed_channels.push_back(xc);
+    smoothed_channels[k] = xc;
   }
   cv::Mat smoothed_img;
   cv::merge(smoothed_channels, smoothed_img);
@@ -778,8 +793,8 @@ main(int argc,
        overlay_text     = false,
        object_selection = false,
        invert           = false,
-       verbose          = false,
-       segment          = false;
+       segment          = false,
+       verbose          = false;
   TextPosition pos = TextPosition::TopLeft;
   cv::Scalar contour_color = Colors::blue;
 
@@ -957,10 +972,10 @@ main(int argc,
   intensity_avg /= nof_channels;
   double stop_cond = tol * cv::norm(intensity_avg, cv::NORM_L2);
   intensity_avg.release();
+  double u_diff_avg = 0;
 
 //-- Open ncurses
   if(verbose) initscr();
-  double u_diff_avg = 0;
 
 //-- Timestep loop
   for(int t = 1; t <= max_steps; ++t)
@@ -992,11 +1007,7 @@ main(int argc,
     const cv::Mat kappa = curvature(u, h, w);
 
 //-- Mash the terms together
-    u_diff /= nof_channels;
-    u_diff -= nu;
-    kappa *= mu;
-    u_diff += kappa;
-    u_diff *= dt;
+    u_diff = dt * (kappa + mu * (u_diff / nof_channels - nu));
 
 //-- Run delta function on the level set
     cv::Mat u_cp = u.clone();
@@ -1012,9 +1023,8 @@ main(int argc,
     {
       u_diff_avg += (u_diff_norm - u_diff_avg) / t;
       clear();
-      printw("\n\nInput: %s\n\n", input_filename.c_str());
       if(max_steps != std::numeric_limits<int>::max())
-        printw("\tCompleted: %f%%\n", static_cast<double>(t) / max_steps * 100);
+        printw("\n\n\tChan-Vese completed: %f%%\n", static_cast<double>(t) / max_steps * 100);
       printw("\ti (i * dt)   = %d (%f)\n", t, t * dt);
       if(grayscale)
       {
@@ -1042,7 +1052,7 @@ main(int argc,
 
 //-- Select the region enclosed by the contour and save it to the disk
   if(object_selection)
-    cv::imwrite(add_suffix(input_filename, "selection"), separate(img, u, invert));
+    cv::imwrite(add_suffix(input_filename, "selection"), separate(img, u, h, w, invert));
 
   return EXIT_SUCCESS;
 }

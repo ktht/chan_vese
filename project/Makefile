@@ -1,6 +1,6 @@
 CXX        = g++
 WFLAGS     = -Wall -Wextra -Wno-unused -Werror
-CXXFLAGS  += $(WFLAGS) -std=c++14
+CXXFLAGS  += $(WFLAGS) -std=c++14 -fopenmp -DNUM_THREADS=3
 LDFLAGS    = -flto -fuse-linker-plugin
 
 ifdef DEBUG
