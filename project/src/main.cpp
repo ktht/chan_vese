@@ -52,7 +52,6 @@
 #include <curses.h>
 #elif defined(__unix__)
 #include <sys/ioctl.h> // struct winsize, ioctl(), TIOCGWINSZ
-#include <ncurses.h> // initscr(), printw(), refresh(), endwin()
 #endif
 
 /**
@@ -872,8 +871,7 @@ main(int argc,
        overlay_text     = false,
        object_selection = false,
        invert           = false,
-       segment          = false,
-       verbose          = false;
+       segment          = false;
   TextPosition pos = TextPosition::TopLeft;
   cv::Scalar contour_color = Colors::blue;
 
@@ -907,7 +905,6 @@ main(int argc,
       ("overlay-text,O",     po::bool_switch(&overlay_text),                                   "add overlay text")
       ("invert-selection,I", po::bool_switch(&invert),                                         "invert selected region (see: select)")
       ("select,s",           po::bool_switch(&object_selection),                               "separate the region encolosed by the contour (adds suffix '_selection')")
-      ("verbose,v",          po::bool_switch(&verbose),                                        "verbose mode")
     ;
     po::variables_map vm;
     po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
@@ -1053,10 +1050,6 @@ main(int argc,
   intensity_avg /= nof_channels;
   double stop_cond = tol * cv::norm(intensity_avg, cv::NORM_L2);
   intensity_avg.release();
-  double u_diff_avg = 0;
-
-//-- Open ncurses
-  if(verbose) initscr();
 
 //-- Timestep loop
   for(int t = 1; t <= max_steps; ++t)
@@ -1099,37 +1092,12 @@ main(int argc,
     const double u_diff_norm = cv::norm(u_diff, cv::NORM_L2);
     u += u_diff;
 
-//-- Print statistics
-    if(verbose)
-    {
-      u_diff_avg += (u_diff_norm - u_diff_avg) / t;
-      clear();
-      if(max_steps != std::numeric_limits<int>::max())
-        printw("\n\n\tChan-Vese completed: %f%%\n", static_cast<double>(t) / max_steps * 100);
-      printw("\ti (i * dt)   = %d (%f)\n", t, t * dt);
-      if(grayscale)
-      {
-        printw("\tc1           = %f\n", c1s[0]);
-        printw("\tc2           = %f\n", c2s[0]);
-      }
-      else
-      {
-        printw("\tc1 (R, G, B) = %s\n", boost::algorithm::join(c1s, ", ").c_str());
-        printw("\tc2 (R, G, B) = %s\n", boost::algorithm::join(c2s, ", ").c_str());
-      }
-      printw("\tu_diff (avg) = %f (%f)\n", u_diff_norm, u_diff_avg);
-      refresh();
-    }
-
 //-- Save the frame
     if(write_video) vwm.write_frame(u, overlay_text ? "t = " + std::to_string(t) : "");
 
 //-- Check if we have achieved the desired precision
     if(u_diff_norm <= stop_cond) break;
   }
-
-//-- Close ncurses
-  if(verbose) endwin();
 
 //-- Select the region enclosed by the contour and save it to the disk
   if(object_selection)

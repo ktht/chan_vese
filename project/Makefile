@@ -30,17 +30,6 @@ LIBS     = -lopencv_core \
            -lboost_system \
            -lboost_filesystem
 
-ifeq ($(OS),Windows_NT)
-  LIBS     += -lpdcurses
-else
-  UNAME_S = $(shell uname -s)
-  ifeq ($(UNAME_S),$(filter $(UNAME_S),Linux Darwin))
-    LIBS     += -lncurses
-  else
-    $(error Unsupported architecture)
-  endif
-endif
-
 SRCS      = main.cpp
 TEST      =
 OBJS      = $(SRCS:%.cpp=$(OBJ_PATH)/%.o)

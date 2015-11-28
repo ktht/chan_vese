@@ -9,8 +9,7 @@ The idea is to reduce noise in the image with Perona-Malik before segmenting the
 Implementation relies on (version number the code was tested with)
 - OpenCV (2.4.8)
 - Boost libraries (1.59.0)
-- ncurses (5.9.20140118; UNIX) / PDcurses (untested; Windows)
-- OpenMP 4.0 (Windows untested)
+- OpenMP 4.0
 
 The compiler must be compatible with the latest C++14 standard (clang 3.6 or gcc 5.0 will do ok).
 
