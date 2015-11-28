@@ -82,6 +82,8 @@
 typedef unsigned char uchar; ///< Short for unsigned char
 typedef unsigned long ulong; ///< Short for unsigned long int
 
+
+
 struct InteractiveData
 {
   InteractiveData(cv::Mat * const _img,
@@ -93,7 +95,14 @@ struct InteractiveData
     , P2(0, 0)
   {}
 
-  cv::Mat * img;
+  virtual bool
+  is_ok() const = 0;
+
+  virtual cv::Mat
+  get_levelset(int h,
+               int w) const = 0;
+
+  cv::Mat * img = nullptr;
   cv::Scalar contour_color;
 
   bool clicked;
@@ -110,12 +119,36 @@ struct InteractiveDataRect
     , roi(0, 0, 0, 0)
   {}
 
-  void calc_roi()
+  void
+  calc_roi()
   {
     roi.x = std::min(P1.x, P2.x);
     roi.y = std::min(P1.y, P2.y);
     roi.width = std::abs(P1.x - P2.x);
     roi.height = std::abs(P1.y - P2.y);
+  }
+
+  /**
+   * @brief Creates a level set with rectangular zero level set
+   * @param w Width of the level set matrix
+   * @param h Height of the level set matrix
+   * @param l Offset in pixels from the underlying image borders
+   * @return The levelset
+   * @todo Add support for offsets from all borders
+   */
+  cv::Mat
+  get_levelset(int h,
+               int w) const override
+  {
+    cv::Mat u = cv::Mat::zeros(h, w, CV_64FC1);
+    u(roi) = 1;
+    return u;
+  }
+
+  bool
+  is_ok() const override
+  {
+    return roi.width != 0 && roi.height != 0;
   }
 
   cv::Rect roi;
@@ -130,9 +163,34 @@ struct InteractiveDataCirc
     , radius(0)
   {}
 
-  void calc_radius()
+  void
+  calc_radius()
   {
     radius = cv::norm(P1 - P2);
+  }
+
+  bool
+  is_ok() const override
+  {
+    return radius > 0;
+  }
+
+  /**
+   * @brief Creates a level set with circular zero level set
+   * @param w Width of the level set matrix
+   * @param h Height of the level set matrix
+   * @param d Diameter of the circle in relative units;
+   *          its value must be within (0, 1); 1 indicates that
+   *          the diameter is minimum of the image dimensions
+   * @return The level set
+   */
+  cv::Mat
+  get_levelset(int h,
+               int w) const override
+  {
+    cv::Mat u = cv::Mat::zeros(h, w, CV_64FC1);
+    cv::circle(u, P1, radius, 1);
+    return u;
   }
 
   double radius;
@@ -501,44 +559,6 @@ regularized_delta(double x,
 {
   const double pi = boost::math::constants::pi<double>();
   return eps / (pi * (std::pow(eps, 2) + std::pow(x, 2)));
-}
-
-/**
- * @brief Creates a level set with rectangular zero level set
- * @param w Width of the level set matrix
- * @param h Height of the level set matrix
- * @param l Offset in pixels from the underlying image borders
- * @return The levelset
- * @todo Add support for offsets from all borders
- */
-cv::Mat
-levelset_rect(const cv::Rect & roi,
-              int h,
-              int w)
-{
-  cv::Mat u = cv::Mat::zeros(h, w, CV_64FC1);
-  u(roi) = 1;
-  return u;
-}
-
-/**
- * @brief Creates a level set with circular zero level set
- * @param w Width of the level set matrix
- * @param h Height of the level set matrix
- * @param d Diameter of the circle in relative units;
- *          its value must be within (0, 1); 1 indicates that
- *          the diameter is minimum of the image dimensions
- * @return The level set
- */
-cv::Mat
-levelset_circ(double radius,
-              cv::Point center,
-              int h,
-              int w)
-{
-  cv::Mat u = cv::Mat::zeros(h, w, CV_64FC1);
-  cv::circle(u, center, radius, 1);
-  return u;
 }
 
 /**
@@ -935,7 +955,7 @@ on_mouse_rect(int event,
 {
   // for the sake of readability, use aliases
   InteractiveDataRect * id = static_cast<InteractiveDataRect *>(id_ptr);
-  InteractiveData * parent_id = static_cast<InteractiveData *>(id);
+  InteractiveData * parent_id = dynamic_cast<InteractiveData *>(id);
   on_mouse(event, x, y, parent_id);
 
   if(id -> clicked) id -> calc_roi();
@@ -954,7 +974,7 @@ on_mouse_circ(int event,
 {
   // for the sake of readability, use aliases
   InteractiveDataCirc * id = static_cast<InteractiveDataCirc *>(id_ptr);
-  InteractiveData * parent_id = static_cast<InteractiveData *>(id);
+  InteractiveData * parent_id = dynamic_cast<InteractiveData *>(id);
   on_mouse(event, x, y, parent_id);
 
   if(id -> clicked) id -> calc_radius();
@@ -1136,37 +1156,32 @@ main(int argc,
 
 //-- Construct the level set
   cv::Mat u;
-  if(rectangle_contour)
-    {
-//-- Interactive contour selection -- rectangle
-      InteractiveDataRect id(&img, contour_color);
-      cv::startWindowThread();
-      cv::namedWindow(WINDOW_TITLE, cv::WINDOW_NORMAL);
-      cv::setMouseCallback(WINDOW_TITLE, on_mouse_rect, &id);
-      cv::imshow(WINDOW_TITLE, img);
-      cv::waitKey();
-      cv::destroyWindow(WINDOW_TITLE);
-
-      if(id.roi.width == 0 || id.roi.height == 0)
-        msg_exit("You must specify the contour with non-zero dimensions");
-      u = levelset_rect(id.roi, h, w);
-    }
-//-- Interactive contour selection -- circle
-  else if(circle_contour)
+  if(rectangle_contour || circle_contour)
   {
-    InteractiveDataCirc id(&img, contour_color);
+    InteractiveData * id = nullptr;
     cv::startWindowThread();
     cv::namedWindow(WINDOW_TITLE, cv::WINDOW_NORMAL);
-    cv::setMouseCallback(WINDOW_TITLE, on_mouse_circ, &id);
+
+    if(rectangle_contour)
+    {
+      id = new InteractiveDataRect(&img, contour_color);
+      cv::setMouseCallback(WINDOW_TITLE, on_mouse_rect, id);
+    }
+    else if(circle_contour)
+    {
+      id = new InteractiveDataCirc(&img, contour_color);
+      cv::setMouseCallback(WINDOW_TITLE, on_mouse_circ, id);
+    }
+
     cv::imshow(WINDOW_TITLE, img);
     cv::waitKey();
     cv::destroyWindow(WINDOW_TITLE);
 
-    if(id.radius < 1)
-      msg_exit("You must specify the contour with non-zero radius");
-    u = levelset_circ(id.radius, id.P1, h, w);
+    if(! id -> is_ok())
+      msg_exit("You must specify the contour with non-zero dimensions");
+
+    u = id -> get_levelset(h, w);
   }
-//-- Or use the default checkerboard contour
   else
     u = levelset_checkerboard(h, w);
 
