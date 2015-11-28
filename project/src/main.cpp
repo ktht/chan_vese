@@ -102,6 +102,26 @@ struct InteractiveData
   cv::Scalar contour_color;
 };
 
+struct InteractiveDataCirc
+{
+  InteractiveDataCirc(cv::Mat * const _img,
+                      const cv::Scalar & _contour_color)
+    : clicked(false)
+    , center(0, 0)
+    , P(0, 0)
+    , radius(0)
+    , img(_img)
+    , contour_color(_contour_color)
+  {}
+
+  bool clicked;
+  cv::Point center;
+  cv::Point P;
+  double radius;
+  cv::Mat * img;
+  cv::Scalar contour_color;
+};
+
 /**
  * @brief The Region enum
  * @sa region_variance
@@ -495,26 +515,13 @@ levelset_rect(const cv::Rect & roi,
  * @return The level set
  */
 cv::Mat
-levelset_circ(int h,
-              int w,
-              double d)
+levelset_circ(double radius,
+              cv::Point center,
+              int h,
+              int w)
 {
-  cv::Mat u(h, w, CV_64FC1);
-  double * const u_ptr = reinterpret_cast<double *>(u.data);
-
-  const int r = std::min(w, h) * d / 2;
-  const int mid_x = w / 2;
-  const int mid_y = h / 2;
-
-  for(int i = 0; i < h; ++i)
-    for(int j = 0; j < w; ++j)
-    {
-      const double d = std::sqrt(std::pow(mid_x - i, 2) +
-                                 std::pow(mid_y - j, 2));
-      if(d < r) u_ptr[i * w + j] = 1;
-      else      u_ptr[i * w + j] = -1;
-    }
-
+  cv::Mat u = cv::Mat::zeros(h, w, CV_64FC1);
+  cv::circle(u, center, radius, 1);
   return u;
 }
 
@@ -869,11 +876,11 @@ perona_malik(const std::vector<cv::Mat> & channels,
 }
 
 void
-onMouse(int event,
-        int x,
-        int y,
-        int f,
-        void * id_ptr)
+on_mouse_rect(int event,
+              int x,
+              int y,
+              int,
+              void * id_ptr)
 {
   // for the sake of readability, use aliases
   InteractiveData * id = static_cast<InteractiveData *>(id_ptr);
@@ -919,6 +926,52 @@ onMouse(int event,
   cv::imshow(WINDOW_TITLE, img);
 }
 
+void
+on_mouse_circ(int event,
+              int x,
+              int y,
+              int,
+              void * id_ptr)
+{
+  // for the sake of readability, use aliases
+  InteractiveDataCirc * id = static_cast<InteractiveDataCirc *>(id_ptr);
+  bool & clicked = id -> clicked;
+  cv::Point & center = id -> center;
+  cv::Point & P = id -> P;
+  double & radius = id -> radius;
+
+  switch(event)
+  {
+    case CV_EVENT_LBUTTONDOWN:
+      clicked = true;
+      center.x = x;
+      center.y = y;
+      P.x = x;
+      P.y = y;
+      break;
+    case CV_EVENT_LBUTTONUP:
+      P.x = x;
+      P.y = y;
+      clicked = false;
+      break;
+    case CV_EVENT_MOUSEMOVE:
+      if(clicked)
+      {
+        P.x = x;
+        P.y = y;
+      }
+      break;
+    default: break;
+  }
+
+  if(clicked)
+    radius = cv::norm(center - P);
+
+  cv::Mat img = id -> img -> clone();
+  cv::circle(img, center, radius, id -> contour_color);
+  cv::imshow(WINDOW_TITLE, img);
+}
+
 int
 main(int argc,
      char ** argv)
@@ -938,7 +991,8 @@ main(int argc,
        object_selection  = false,
        invert            = false,
        segment           = false,
-       rectangle_contour = false;
+       rectangle_contour = false,
+       circle_contour    = false;
   TextPosition pos = TextPosition::TopLeft;
   cv::Scalar contour_color = Colors::blue;
 
@@ -972,7 +1026,8 @@ main(int argc,
       ("overlay-text,O",     po::bool_switch(&overlay_text),                                   "add overlay text")
       ("invert-selection,I", po::bool_switch(&invert),                                         "invert selected region (see: select)")
       ("select,s",           po::bool_switch(&object_selection),                               "separate the region encolosed by the contour (adds suffix '_selection')")
-      ("rectangle,R",        po::bool_switch(&rectangle_contour),                              "select rectangle contour interactively")
+      ("rectangle,R",        po::bool_switch(&rectangle_contour),                              "select rectangular contour interactively")
+      ("circle,C",           po::bool_switch(&circle_contour),                                 "select circular contour interactively")
     ;
     po::variables_map vm;
     po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
@@ -1058,6 +1113,8 @@ main(int argc,
     if(vm.count("segment-time") && (T < L))
       msg_exit("The segmentation duration must exceed the value of Laplacian coefficient, " +
                std::to_string(L) + ".");
+    if(rectangle_contour && circle_contour)
+      msg_exit("Cannot initialize with both rectangular and circular contour");
   }
   catch(std::exception & e)
   {
@@ -1093,7 +1150,7 @@ main(int argc,
       InteractiveData id(&img, contour_color);
       cv::startWindowThread();
       cv::namedWindow(WINDOW_TITLE, cv::WINDOW_NORMAL);
-      cv::setMouseCallback(WINDOW_TITLE, onMouse, &id);
+      cv::setMouseCallback(WINDOW_TITLE, on_mouse_rect, &id);
       cv::imshow(WINDOW_TITLE, img);
       cv::waitKey();
       cv::destroyWindow(WINDOW_TITLE);
@@ -1102,6 +1159,21 @@ main(int argc,
         msg_exit("You must specify the contour with non-zero dimensions");
       u = levelset_rect(id.roi, h, w);
     }
+//-- Interactive contour selection -- circle
+  else if(circle_contour)
+  {
+    InteractiveDataCirc id(&img, contour_color);
+    cv::startWindowThread();
+    cv::namedWindow(WINDOW_TITLE, cv::WINDOW_NORMAL);
+    cv::setMouseCallback(WINDOW_TITLE, on_mouse_circ, &id);
+    cv::imshow(WINDOW_TITLE, img);
+    cv::waitKey();
+    cv::destroyWindow(WINDOW_TITLE);
+
+    if(id.radius < 1)
+      msg_exit("You must specify the contour with non-zero radius");
+    u = levelset_circ(id.radius, id.center, h, w);
+  }
 //-- Or use checkerboard contour
   else
     u = levelset_checkerboard(h, w);
