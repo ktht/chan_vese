@@ -86,40 +86,56 @@ struct InteractiveData
 {
   InteractiveData(cv::Mat * const _img,
                   const cv::Scalar & _contour_color)
-    : clicked(false)
+    : img(_img)
+    , contour_color(_contour_color)
+    , clicked(false)
     , P1(0, 0)
     , P2(0, 0)
-    , roi(0, 0, 0, 0)
-    , img(_img)
-    , contour_color(_contour_color)
   {}
+
+  cv::Mat * img;
+  cv::Scalar contour_color;
 
   bool clicked;
   cv::Point P1;
   cv::Point P2;
+};
+
+struct InteractiveDataRect
+  : public InteractiveData
+{
+  InteractiveDataRect(cv::Mat * const _img,
+                      const cv::Scalar & _contour_color)
+    : InteractiveData(_img, _contour_color)
+    , roi(0, 0, 0, 0)
+  {}
+
+  void calc_roi()
+  {
+    roi.x = std::min(P1.x, P2.x);
+    roi.y = std::min(P1.y, P2.y);
+    roi.width = std::abs(P1.x - P2.x);
+    roi.height = std::abs(P1.y - P2.y);
+  }
+
   cv::Rect roi;
-  cv::Mat * img;
-  cv::Scalar contour_color;
 };
 
 struct InteractiveDataCirc
+  : public InteractiveData
 {
   InteractiveDataCirc(cv::Mat * const _img,
                       const cv::Scalar & _contour_color)
-    : clicked(false)
-    , center(0, 0)
-    , P(0, 0)
+    : InteractiveData(_img, _contour_color)
     , radius(0)
-    , img(_img)
-    , contour_color(_contour_color)
   {}
 
-  bool clicked;
-  cv::Point center;
-  cv::Point P;
+  void calc_radius()
+  {
+    radius = cv::norm(P1 - P2);
+  }
+
   double radius;
-  cv::Mat * img;
-  cv::Scalar contour_color;
 };
 
 /**
@@ -876,18 +892,14 @@ perona_malik(const std::vector<cv::Mat> & channels,
 }
 
 void
-on_mouse_rect(int event,
-              int x,
-              int y,
-              int,
-              void * id_ptr)
+on_mouse(int event,
+         int x,
+         int y,
+         InteractiveData * id_ptr)
 {
-  // for the sake of readability, use aliases
-  InteractiveData * id = static_cast<InteractiveData *>(id_ptr);
-  bool & clicked = id -> clicked;
-  cv::Point & P1 = id -> P1;
-  cv::Point & P2 = id -> P2;
-  cv::Rect & roi = id -> roi;
+  bool & clicked = id_ptr -> clicked;
+  cv::Point & P1 = id_ptr -> P1;
+  cv::Point & P2 = id_ptr -> P2;
 
   switch(event)
   {
@@ -912,17 +924,24 @@ on_mouse_rect(int event,
       break;
     default: break;
   }
+}
 
-  if(clicked)
-  {
-    roi.x = std::min(P1.x, P2.x);
-    roi.y = std::min(P1.y, P2.y);
-    roi.width = std::abs(P1.x - P2.x);
-    roi.height = std::abs(P1.y - P2.y);
-  }
+void
+on_mouse_rect(int event,
+              int x,
+              int y,
+              int,
+              void * id_ptr)
+{
+  // for the sake of readability, use aliases
+  InteractiveDataRect * id = static_cast<InteractiveDataRect *>(id_ptr);
+  InteractiveData * parent_id = static_cast<InteractiveData *>(id);
+  on_mouse(event, x, y, parent_id);
+
+  if(id -> clicked) id -> calc_roi();
 
   cv::Mat img = id -> img -> clone();
-  cv::rectangle(img, roi, id -> contour_color);
+  cv::rectangle(img, id -> roi, id -> contour_color);
   cv::imshow(WINDOW_TITLE, img);
 }
 
@@ -935,40 +954,13 @@ on_mouse_circ(int event,
 {
   // for the sake of readability, use aliases
   InteractiveDataCirc * id = static_cast<InteractiveDataCirc *>(id_ptr);
-  bool & clicked = id -> clicked;
-  cv::Point & center = id -> center;
-  cv::Point & P = id -> P;
-  double & radius = id -> radius;
+  InteractiveData * parent_id = static_cast<InteractiveData *>(id);
+  on_mouse(event, x, y, parent_id);
 
-  switch(event)
-  {
-    case CV_EVENT_LBUTTONDOWN:
-      clicked = true;
-      center.x = x;
-      center.y = y;
-      P.x = x;
-      P.y = y;
-      break;
-    case CV_EVENT_LBUTTONUP:
-      P.x = x;
-      P.y = y;
-      clicked = false;
-      break;
-    case CV_EVENT_MOUSEMOVE:
-      if(clicked)
-      {
-        P.x = x;
-        P.y = y;
-      }
-      break;
-    default: break;
-  }
-
-  if(clicked)
-    radius = cv::norm(center - P);
+  if(id -> clicked) id -> calc_radius();
 
   cv::Mat img = id -> img -> clone();
-  cv::circle(img, center, radius, id -> contour_color);
+  cv::circle(img, id -> P1, id -> radius, id -> contour_color);
   cv::imshow(WINDOW_TITLE, img);
 }
 
@@ -1147,7 +1139,7 @@ main(int argc,
   if(rectangle_contour)
     {
 //-- Interactive contour selection -- rectangle
-      InteractiveData id(&img, contour_color);
+      InteractiveDataRect id(&img, contour_color);
       cv::startWindowThread();
       cv::namedWindow(WINDOW_TITLE, cv::WINDOW_NORMAL);
       cv::setMouseCallback(WINDOW_TITLE, on_mouse_rect, &id);
@@ -1172,9 +1164,9 @@ main(int argc,
 
     if(id.radius < 1)
       msg_exit("You must specify the contour with non-zero radius");
-    u = levelset_circ(id.radius, id.center, h, w);
+    u = levelset_circ(id.radius, id.P1, h, w);
   }
-//-- Or use checkerboard contour
+//-- Or use the default checkerboard contour
   else
     u = levelset_checkerboard(h, w);
 
