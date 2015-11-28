@@ -1,5 +1,5 @@
-PROJECT_NAME           = "Chan-Vese segmentation"
-PROJECT_BRIEF          = "C++ implementation of Chan-Sandberg-Vese segmentation algorithm"
+PROJECT_NAME           = "PM + CSV segmentation"
+PROJECT_BRIEF          = "C++ implementation of Perona-Malik + Chan-Sandberg-Vese segmentation algorithms"
 OUTPUT_DIRECTORY       = doc
 BUILTIN_STL_SUPPORT    = YES
 CPP_CLI_SUPPORT        = YES

@@ -1,6 +1,8 @@
-## Chan-Vese segmentation in C++
+## PM+CSV segmentation in C++
 
-This is a quick implementation of Chan-Vese segmentation in C++.
+This is a quick implementation of Perona-Malik + Chan-Sandberg-Vese segmentation in C++.
+
+The idea is to reduce noise in the image with Perona-Malik before segmenting the region with Chan-Sandberg-Vese algorithm, as the latter is relatively sensitive to noise.
 
 ### Details
 
@@ -8,6 +10,7 @@ Implementation relies on (version number the code was tested with)
 - OpenCV (2.4.8)
 - Boost libraries (1.59.0)
 - ncurses (5.9.20140118; UNIX) / PDcurses (untested; Windows)
+- OpenMP 4.0 (Windows untested)
 
 The compiler must be compatible with the latest C++14 standard (clang 3.6 or gcc 5.0 will do ok).
 

@@ -63,11 +63,21 @@
  *       - add level set reinitialization
  * @mainpage
  * @section intro_sec Introduction
- * This is the implementation of Chan-Sandberg-Vese segmentation algorithm in C++.
+ * This is the implementation of Perona-Malik + Chan-Sandberg-Vese segmentation algorithm in C++.
+ * The premise of this code is that CSV segmentation is very sensitive to noise.
+ * In order to get rid of the noise, we use Perona-Malik (which is optional) to smooth noisy
+ * regions in the image. PM is optimal, because it preserves edges (unlike ordinary Gaussian blur).
+ * The contour is calculated
  *
- * The article @cite Getreuer2012 is taken as a starting point in this implementation.
+ * The article @cite Getreuer2012 is taken as a starting point in implementing CSV segmentation.
  * However, the text was short of describing vector-valued, i.e. multi-channel (RGB) images.
  * Fortunately, the original paper @cite Chan2000 proved to be useful.
+ * PM segmentation is entirely based on the seminal paper @cite Perona1990.
+ *
+ * The code works for both grayscale and RGB images (any popular format is supported).
+ * It mostly relies on OpenCV routines @cite Bradski2000. Some parallelization is done
+ * across the channels with OpenMP preprocessors; one method is parallelized with TBB via
+ * OpenCV interface.
  */
 
 typedef unsigned char uchar; ///< Short for unsigned char
@@ -690,14 +700,75 @@ separate(const cv::Mat & img,
 }
 
 /**
- * @brief perona_malik
- * @param channels
- * @param h
- * @param w
- * @param K
- * @param L
- * @param T
- * @return
+ * @brief Implementation of Perona-Malik segmentation.
+ *
+ * The method implements Perona-Malik segmentation for a multichannel image
+ * (the smoothing is applied to each channel separately, hence easily parallelizable).
+ * The idea is to evolve the image @f$I=I(t;\,x,\,y)@f$ according to
+ *   @f[ I_{t} = \nabla c\cdot\nabla I+c\Delta I\,, @f]
+ * where @f$c=c(t;\,x,\,y)@f$ is the diffusion coefficient function.  For the choice of @f$c@f$
+ * we picked
+ *   @f[ c(||\nabla I||) = \frac{1}{1+\left(\frac{||\nabla I||}{K}\right)^{2}}\,. @f]
+ * Note that there are other possibilities for @f$c@f$, e.g. an exponential function
+ * dependant on the magnitude of normalized image gradient, @f$||\nabla I||@f$. In general,
+ * any function @f$f(x)@f$ for which @f$f(0) = 1@f$ and @f$\lim_{x\to\infty}f(x)=0@f$
+ * would do the trick. Parameter @f$K@f$ here regulates the sensitivity of detecting the edges:
+ * the larger it is, the more the edges will be smeared.
+ *
+ * To make any sense of this, consider the case where @f$c@f$ is constant. This way the first
+ * term in the RHS of the e.o.m is zero and the equation reduces to that of Gaussian blurring.
+ * If the image contains any edges, they will be smoothed out. However, if we use a function
+ * that will be zero in the region containing no edges and non-zero if there's an edge,
+ * we'd smooth only the regions with no edges.
+ *
+ * In every time step we first calculate the magnitude of normalized image gradient by
+ * convoluting the image with Sobel kernels,
+ *   @f[
+ *        \mathbf{G}_{x}=\begin{pmatrix}-1&0&1\\-2&0&2\\-1&0&1\end{pmatrix}*I\,,\quad
+ *        \mathbf{G}_{y}=\begin{pmatrix}-1&-2&-1\\0&0&0\\1&2&1\end{pmatrix}*I\,,
+ *   @f]
+ * and calculating its square modulus with
+ * @f$||\nabla I||^2=\mathbf{G}_{x}^{2}+\mathbf{G}_{x}^{2}@f$. This step is actually
+ * combined with the calculation of @f$c(||\nabla I||)@f$. At the image border we keep
+ * the function constant, though: @f$\left.c\right|_{\partial I}=1@f$.
+ *
+ * The e.o.m is approximated by (per original paper @cite Perona1990):
+ *   @f[
+ *       I_{i,j}^{t+1}=I_{i,j}^{t}+L[
+ *                     c_{S}\nabla_{S}I+
+ *                     c_{E}\nabla_{E}I+
+ *                     c_{N}\nabla_{N}I+
+ *                     c_{W}\nabla_{W}I
+ *                    ]_{i,j}^{t}\,, @f]
+ * where
+ *   - @f$L\in(0,1/4)@f$ is there for the numerical scheme to be stable (note that in the paper
+ *     the authors use @f$\lambda@f$ instead of @f$L@f$); it serves as a time step as well
+ *   - @f$\nabla_{k}@f$ with @f$k=\{S,\,E,\,N,\,W\}@f$ denote nearest neighbour differences:
+ *       @f{eqnarray*}{ &\nabla_{S}I_{i,j}=I_{i+1,j}-I_{i,j}\,,\\
+ *                      &\nabla_{E}I_{i,j}=I_{i,j+1}-I_{i,j}\,,\\
+ *                      &\nabla_{N}I_{i,j}=I_{i-1,j}-I_{i,j}\,,\\
+ *                      &\nabla_{W}I_{i,j}=I_{i,j-1}-I_{i,j}\,;
+ *       @f}
+ *   - and @f$c_{k}@f$ denote respective diffusion coefficients:
+ *       @f{eqnarray*}{
+ * &c_{S_{i,j}}^{t}=c(||(\nabla I)_{i-1/2,j}^{t}||)
+ *                  \approx\frac{1}{4}[c(||(\nabla I)_{i+1,j}||)+c(||(\nabla I)_{i,j}||)]^{t}\,,\\
+ * &c_{E_{i,j}}^{t}=c(||(\nabla I)_{i,j+1/2}^{t}||)
+ *                  \approx\frac{1}{4}[c(||(\nabla I)_{i,j+1}||)+c(||(\nabla I)_{i,j}||)]^{t}\,,\\
+ * &c_{N_{i,j}}^{t}=c(||(\nabla I)_{i+1/2,j}^{t}||)
+ *                  \approx\frac{1}{4}[c(||(\nabla I)_{i-1,j}||)+c(||(\nabla I)_{i,j}||)]^{t}\,,\\
+ * &c_{W_{i,j}}^{t}=c(||(\nabla I)_{i,j-1/2}^{t}||)
+ *                  \approx\frac{1}{4}[c(||(\nabla I)_{i,j-1}||)+c(||(\nabla I)_{i,j}||)]^{t}\,.
+ *       @f}
+ * The iteration process lasts until specified time @f$T@f$.
+ *
+ * @param channels The original image split into channels.
+ * @param h        Height of the image
+ * @param w        Width of the image
+ * @param K        Edge detection parameter @f$K@f$ (same for all channels).
+ * @param L        Laplacian parameter @f$L@f$ (same for all channels).
+ * @param T        Time scale @f$T@f$ (same for all channels).
+ * @return Smoothed image @f$I(T)@f$.
  */
 cv::Mat
 perona_malik(const std::vector<cv::Mat> & channels,
@@ -713,25 +784,25 @@ perona_malik(const std::vector<cv::Mat> & channels,
 #pragma omp parallel for num_threads(nof_channels)
   for(int k = 0; k < nof_channels; ++k)
   {
-    cv::Mat x0(h, w, CV_64FC1),
-            x1(h, w, CV_64FC1),
-            xc(h, w, CV_8UC1);
-    channels[k].copyTo(x0);
-    x0.convertTo(x0, CV_64FC1);
+    cv::Mat I_prev(h, w, CV_64FC1), // image at previous time step
+            I_curr(h, w, CV_64FC1), // image at current time step
+            I_res(h, w, CV_8UC1);   // the resulting image
+    channels[k].copyTo(I_prev);
+    I_prev.convertTo(I_prev, CV_64FC1);
 
     for (double t = 0; t < T; t += L)
     {
       cv::Mat g(h, w, CV_64FC1),
               dx(h, w, CV_64FC1),
               dy(h, w, CV_64FC1);
-      cv::Sobel(x0, dx, CV_64FC1, 1, 0, 3);
-      cv::Sobel(x0, dy, CV_64FC1, 0, 1, 3);
-      x1 = cv::Mat::zeros(h, w, CV_64F);
+      cv::Sobel(I_prev, dx, CV_64FC1, 1, 0, 3);
+      cv::Sobel(I_prev, dy, CV_64FC1, 0, 1, 3);
+      I_curr = cv::Mat::zeros(h, w, CV_64F);
 
-      const double * const x0_ptr = reinterpret_cast<double *>(x0.data);
+      const double * const I_prev_ptr = reinterpret_cast<double *>(I_prev.data);
       const double * const dx_ptr = reinterpret_cast<double *>(dx.data);
       const double * const dy_ptr = reinterpret_cast<double *>(dy.data);
-      double * const x1_ptr = reinterpret_cast<double *>(x1.data);
+      double * const I_curr_ptr = reinterpret_cast<double *>(I_curr.data);
       double * const g_ptr = reinterpret_cast<double *>(g.data);
 
       for(int i = 0; i < h; ++i)
@@ -753,11 +824,11 @@ perona_malik(const std::vector<cv::Mat> & channels,
           const int jn = j == w - 1 ? j : j + 1;
           const int jp = j == 0     ? j : j - 1;
 
-          const double Is = x0_ptr[in * w + j ];
-          const double Ie = x0_ptr[i  * w + jn];
-          const double In = x0_ptr[ip * w + j ];
-          const double Iw = x0_ptr[i  * w + jp];
-          const double I0 = x0_ptr[i  * w + j ];
+          const double Is = I_prev_ptr[in * w + j ];
+          const double Ie = I_prev_ptr[i  * w + jn];
+          const double In = I_prev_ptr[ip * w + j ];
+          const double Iw = I_prev_ptr[i  * w + jp];
+          const double I0 = I_prev_ptr[i  * w + j ];
 
           const double cs = g_ptr[in * w + j ];
           const double ce = g_ptr[i  * w + jn];
@@ -765,17 +836,17 @@ perona_malik(const std::vector<cv::Mat> & channels,
           const double cw = g_ptr[i  * w + jp];
           const double c0 = g_ptr[i  * w + j ];
 
-          x1_ptr[i * w + j] = I0 + L * ((cs + c0) * (Is - I0) +
-                                        (ce + c0) * (Ie - I0) +
-                                        (cn + c0) * (In - I0) +
-                                        (cw + c0) * (Iw - I0) ) / 4;
+          I_curr_ptr[i * w + j] = I0 + L * ((cs + c0) * (Is - I0) +
+                                            (ce + c0) * (Ie - I0) +
+                                            (cn + c0) * (In - I0) +
+                                            (cw + c0) * (Iw - I0) ) / 4;
         }
 
-      x1.copyTo(x0);
-      x0.convertTo(xc, CV_8UC1);
+      I_curr.copyTo(I_prev);
+      I_prev.convertTo(I_res, CV_8UC1);
     }
 
-    smoothed_channels[k] = xc;
+    smoothed_channels[k] = I_res;
   }
   cv::Mat smoothed_img;
   cv::merge(smoothed_channels, smoothed_img);
@@ -828,7 +899,7 @@ main(int argc,
       ("overlay-pos,P",      po::value<std::string>(&text_position) -> default_value("TL"),    "overlay tex position; allowed only: TL, BL, TR, BR")
       ("line-color,l",       po::value<std::string>(&line_color_str) -> default_value("blue"), "contour color (allowed only: red, green, blue, black, white)")
       ("edge-coef,K",        po::value<double>(&K) -> default_value(10),                       "coefficient for enhancing edge detection in Perona-Malik")
-      ("laplacian-coef,L",   po::value<double>(&L) -> default_value(0.25),                     "coefficient in the Laplacian FD scheme of Perona-Malik (must be [0, 1/4])")
+      ("laplacian-coef,L",   po::value<double>(&L) -> default_value(0.25),                     "coefficient in the gradient FD scheme of Perona-Malik (must be [0, 1/4])")
       ("segment-time,T",     po::value<double>(&T) -> default_value(20),                       "number of smoothing steps in Perona-Malik")
       ("segment,S",          po::bool_switch(&segment),                                        "segment the image with Perona-Malik beforehand")
       ("grayscale,g",        po::bool_switch(&grayscale),                                      "read in as grayscale")
@@ -993,9 +1064,8 @@ main(int argc,
     cv::Mat u_diff(cv::Mat::zeros(h, w, CV_64FC1));
 
 //-- For statistics
-    std::vector<std::string> c1s, c2s;
-    c1s.reserve(nof_channels);
-    c2s.reserve(nof_channels);
+    std::vector<std::string> c1s(nof_channels),
+                             c2s(nof_channels);
 
 //-- Channel loop
 #pragma omp parallel for num_threads(nof_channels)
@@ -1006,13 +1076,13 @@ main(int argc,
       const double c1 = region_variance(channel, u, h, w, Region::Inside, heaviside);
       const double c2 = region_variance(channel, u, h, w, Region::Outside, heaviside);
 
-      c1s.push_back(std::to_string(c1));
-      c2s.push_back(std::to_string(c2));
-
 //-- Calculate the contribution of one channel to the level set
       const cv::Mat variance_inside = variance_penalty(channel, h, w, c1, lambda1[k]);
       const cv::Mat variance_outside = variance_penalty(channel, h, w, c2, lambda2[k]);
       u_diff += -variance_inside + variance_outside;
+
+      c1s[k] = std::to_string(c1);
+      c2s[k] = std::to_string(c2);
     }
 //-- Calculate the curvature (divergence of normalized gradient)
     const cv::Mat kappa = curvature(u, h, w);
