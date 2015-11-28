@@ -82,17 +82,34 @@
 typedef unsigned char uchar; ///< Short for unsigned char
 typedef unsigned long ulong; ///< Short for unsigned long int
 
-
+// prototypes
+void
+on_mouse_rect(int event,
+              int x,
+              int y,
+              int,
+              void * id_ptr);
+void
+on_mouse_circ(int event,
+              int x,
+              int y,
+              int,
+              void * id_ptr);
 
 struct InteractiveData
 {
   InteractiveData(cv::Mat * const _img,
-                  const cv::Scalar & _contour_color)
+                  const cv::Scalar & _contour_color,
+                  void (* _mouse_cb) (int, int, int, int, void *))
     : img(_img)
     , contour_color(_contour_color)
     , clicked(false)
     , P1(0, 0)
     , P2(0, 0)
+    , mouse_cb(_mouse_cb)
+  {}
+
+  virtual ~InteractiveData()
   {}
 
   virtual bool
@@ -108,6 +125,7 @@ struct InteractiveData
   bool clicked;
   cv::Point P1;
   cv::Point P2;
+  void (* mouse_cb) (int, int, int, int, void *);
 };
 
 struct InteractiveDataRect
@@ -115,7 +133,7 @@ struct InteractiveDataRect
 {
   InteractiveDataRect(cv::Mat * const _img,
                       const cv::Scalar & _contour_color)
-    : InteractiveData(_img, _contour_color)
+    : InteractiveData(_img, _contour_color, on_mouse_rect)
     , roi(0, 0, 0, 0)
   {}
 
@@ -159,7 +177,7 @@ struct InteractiveDataCirc
 {
   InteractiveDataCirc(cv::Mat * const _img,
                       const cv::Scalar & _contour_color)
-    : InteractiveData(_img, _contour_color)
+    : InteractiveData(_img, _contour_color, on_mouse_circ)
     , radius(0)
   {}
 
@@ -1163,24 +1181,22 @@ main(int argc,
     cv::namedWindow(WINDOW_TITLE, cv::WINDOW_NORMAL);
 
     if(rectangle_contour)
-    {
       id = new InteractiveDataRect(&img, contour_color);
-      cv::setMouseCallback(WINDOW_TITLE, on_mouse_rect, id);
-    }
     else if(circle_contour)
-    {
       id = new InteractiveDataCirc(&img, contour_color);
-      cv::setMouseCallback(WINDOW_TITLE, on_mouse_circ, id);
-    }
 
+    if(id) cv::setMouseCallback(WINDOW_TITLE, id -> mouse_cb, id);
     cv::imshow(WINDOW_TITLE, img);
     cv::waitKey();
     cv::destroyWindow(WINDOW_TITLE);
 
-    if(! id -> is_ok())
-      msg_exit("You must specify the contour with non-zero dimensions");
-
-    u = id -> get_levelset(h, w);
+    if(id)
+    {
+      if(! id -> is_ok())
+        msg_exit("You must specify the contour with non-zero dimensions");
+      u = id -> get_levelset(h, w);
+      delete id;
+    }
   }
   else
     u = levelset_checkerboard(h, w);
