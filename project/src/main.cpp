@@ -1056,10 +1056,6 @@ main(int argc,
   {
     cv::Mat u_diff(cv::Mat::zeros(h, w, CV_64FC1));
 
-//-- For statistics
-    std::vector<std::string> c1s(nof_channels),
-                             c2s(nof_channels);
-
 //-- Channel loop
 #pragma omp parallel for num_threads(nof_channels)
     for(int k = 0; k < nof_channels; ++k)
@@ -1073,9 +1069,6 @@ main(int argc,
       const cv::Mat variance_inside = variance_penalty(channel, h, w, c1, lambda1[k]);
       const cv::Mat variance_outside = variance_penalty(channel, h, w, c2, lambda2[k]);
       u_diff += -variance_inside + variance_outside;
-
-      c1s[k] = std::to_string(c1);
-      c2s[k] = std::to_string(c2);
     }
 //-- Calculate the curvature (divergence of normalized gradient)
     const cv::Mat kappa = curvature(u, h, w);
