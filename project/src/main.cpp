@@ -77,13 +77,23 @@
  * OpenCV interface.
  */
 
-#define WINDOW_TITLE "Select contour"
+#define WINDOW_TITLE "Select contour" ///< Title of the window at startup
 
 typedef unsigned char uchar; ///< Short for unsigned char
 typedef unsigned long ulong; ///< Short for unsigned long int
 
+/**
+ * @brief Abstract class holding necessary information to let the user specify the
+ *        initial contour.
+ * @sa InteractiveDataRect, InteractiveDataCirc
+ */
 struct InteractiveData
 {
+  /**
+   * @brief Simple constructor.
+   * @param _img           Image onto which the contour will be drawn
+   * @param _contour_color Contour color
+   */
   InteractiveData(cv::Mat * const _img,
                   const cv::Scalar & _contour_color)
     : img(_img)
@@ -96,18 +106,49 @@ struct InteractiveData
   virtual ~InteractiveData()
   {}
 
+  /**
+   * @brief  Checks whether the contour specified by the user is valid or not
+   * @return True, if it's valid, false otherwise
+   */
   virtual bool
   is_ok() const = 0;
 
+  /**
+   * @brief Returns level set based on the contour specified by the user.
+   *        The region enclosed by the contour is filled with ones;
+   *        the region outside the contour is filled with zeros.
+   * @param h Height of the requested level set
+   * @param w Width of the requested level set
+   * @return The level set
+   */
   virtual cv::Mat
   get_levelset(int h,
                int w) const = 0;
 
+  /**
+   * @brief Mouse callback function.
+   *        In principle is responsible for displaying the original image and
+   *        drawing the contour onto it
+   * @param event Event number
+   * @param x     x-coordinate of the mouse in the window
+   * @param y     y-coordinate of the mouse in the window
+   * @sa on_mouse, mouse_on_common
+   */
   virtual void
   mouse_on(int event,
            int x,
            int y) = 0;
 
+  /**
+   * @brief Common logic in the callback functions implemented by the subclasses:
+   *          - if the left button of the mouse is pressed, its position is recorded for both P1 and P2
+   *          - if the left button is released, P2 is registered
+   *          - in order to show the contour while left button is pressed and moved, we save
+   *            the position only into P2
+   * @param event Event number
+   * @param x     x-coordinate of the mouse in the window
+   * @param y     y-coordinate of the mouse in the window
+   */
   void
   mouse_on_common(int event,
                   int x,
@@ -138,40 +179,39 @@ struct InteractiveData
     }
   }
 
-  cv::Mat * img = nullptr;
-  cv::Scalar contour_color;
+protected:
+  cv::Mat * img = nullptr; ///< Pointer to the original image onto which the contour will be drawn
+  cv::Scalar contour_color; ///< Color of the contour that will be drawn on the image
 
-  bool clicked;
-  cv::Point P1;
-  cv::Point P2;
+  bool clicked; ///< A boolean that keeps track whether the mouse button is pressed down or not
+  cv::Point P1; ///< Coordinate of the mouse while its left button is pressed down
+  cv::Point P2; ///< Coordinate of the mouse while its left button is released
 };
 
+/**
+ * @brief Implements InteractiveData class; the callback function lets the user
+ *        draw a rectangular contour.
+ */
 struct InteractiveDataRect
   : public InteractiveData
 {
+  /**
+   * @brief Simple constructor; initializes rectangular contour
+   * @param _img           Image onto which the contour will be drawn
+   * @param _contour_color Contour color
+   */
   InteractiveDataRect(cv::Mat * const _img,
                       const cv::Scalar & _contour_color)
     : InteractiveData(_img, _contour_color)
     , roi(0, 0, 0, 0)
   {}
 
-  void
-  calc_roi()
+  bool
+  is_ok() const override
   {
-    roi.x = std::min(P1.x, P2.x);
-    roi.y = std::min(P1.y, P2.y);
-    roi.width = std::abs(P1.x - P2.x);
-    roi.height = std::abs(P1.y - P2.y);
+    return roi.width != 0 && roi.height != 0;
   }
 
-  /**
-   * @brief Creates a level set with rectangular zero level set
-   * @param w Width of the level set matrix
-   * @param h Height of the level set matrix
-   * @param l Offset in pixels from the underlying image borders
-   * @return The levelset
-   * @todo Add support for offsets from all borders
-   */
   cv::Mat
   get_levelset(int h,
                int w) const override
@@ -181,12 +221,6 @@ struct InteractiveDataRect
     return u;
   }
 
-  bool
-  is_ok() const override
-  {
-    return roi.width != 0 && roi.height != 0;
-  }
-
   void
   mouse_on(int event,
            int x,
@@ -194,30 +228,40 @@ struct InteractiveDataRect
   {
     mouse_on_common(event, x, y);
 
-    if(clicked) calc_roi();
+    if(clicked)
+    {
+      roi.x = std::min(P1.x, P2.x);
+      roi.y = std::min(P1.y, P2.y);
+      roi.width = std::abs(P1.x - P2.x);
+      roi.height = std::abs(P1.y - P2.y);
+    }
 
     cv::Mat img_cp = img -> clone();
     cv::rectangle(img_cp, roi, contour_color);
     cv::imshow(WINDOW_TITLE, img_cp);
   }
 
-  cv::Rect roi;
+private:
+  cv::Rect roi; ///< Rectangular contour represented by OpenCV's object
 };
 
+/**
+ * @brief Implements InteractiveData class; the callback function lets the user
+ *        draw a circular contour.
+ */
 struct InteractiveDataCirc
   : public InteractiveData
 {
+  /**
+   * @brief Simple constructor; initializes rectangular contour
+   * @param _img           Image onto which the contour will be drawn
+   * @param _contour_color Contour color
+   */
   InteractiveDataCirc(cv::Mat * const _img,
                       const cv::Scalar & _contour_color)
     : InteractiveData(_img, _contour_color)
     , radius(0)
   {}
-
-  void
-  calc_radius()
-  {
-    radius = cv::norm(P1 - P2);
-  }
 
   bool
   is_ok() const override
@@ -225,15 +269,6 @@ struct InteractiveDataCirc
     return radius > 0;
   }
 
-  /**
-   * @brief Creates a level set with circular zero level set
-   * @param w Width of the level set matrix
-   * @param h Height of the level set matrix
-   * @param d Diameter of the circle in relative units;
-   *          its value must be within (0, 1); 1 indicates that
-   *          the diameter is minimum of the image dimensions
-   * @return The level set
-   */
   cv::Mat
   get_levelset(int h,
                int w) const override
@@ -250,14 +285,15 @@ struct InteractiveDataCirc
   {
     mouse_on_common(event, x, y);
 
-    if(clicked) calc_radius();
+    if(clicked) radius = cv::norm(P1 - P2);
 
     cv::Mat img_cp = img -> clone();
     cv::circle(img_cp, P1, radius, contour_color);
     cv::imshow(WINDOW_TITLE, img_cp);
   }
 
-  double radius;
+private:
+  double radius; ///< Radius of the circular contour
 };
 
 /**
@@ -975,6 +1011,16 @@ perona_malik(const std::vector<cv::Mat> & channels,
   return smoothed_img;
 }
 
+/**
+ * @brief Callback function for drawing contour on the image
+ *        Calls InteractiveData virtual function mouse_on, which is implemented
+ *        in its subclasses InteractiveDataRect (rectangular contour) and
+ *        InteractiveDataCirc (circular contour)
+ * @param event Event number
+ * @param x     x-coordinate of the mouse in the window
+ * @param y     y-coordinate of the mouse in the window
+ * @param id    Additional data, which will be converted into InteractiveData pointer
+ */
 void
 on_mouse(int event,
          int x,
