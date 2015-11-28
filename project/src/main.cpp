@@ -57,8 +57,6 @@
 /**
  * @file
  * @todo
- *       - add an option to specify the initial contour from command line OR
- *         add capability to set the contour by clicking twice on the image (rectangle/circle)
  *       - add level set reinitialization
  * @mainpage
  * @section intro_sec Introduction
@@ -79,8 +77,30 @@
  * OpenCV interface.
  */
 
+#define WINDOW_TITLE "Select contour"
+
 typedef unsigned char uchar; ///< Short for unsigned char
 typedef unsigned long ulong; ///< Short for unsigned long int
+
+struct InteractiveData
+{
+  InteractiveData(cv::Mat * const _img,
+                  const cv::Scalar & _contour_color)
+    : clicked(false)
+    , P1(0, 0)
+    , P2(0, 0)
+    , roi(0, 0, 0, 0)
+    , img(_img)
+    , contour_color(_contour_color)
+  {}
+
+  bool clicked;
+  cv::Point P1;
+  cv::Point P2;
+  cv::Rect roi;
+  cv::Mat * img;
+  cv::Scalar contour_color;
+};
 
 /**
  * @brief The Region enum
@@ -99,18 +119,24 @@ enum TextPosition { TopLeft, TopRight, BottomLeft, BottomRight };
  */
 struct Colors
 {
-  static const cv::Scalar white; ///< White
-  static const cv::Scalar black; ///< Black
-  static const cv::Scalar red;   ///< Red
-  static const cv::Scalar green; ///< Green
-  static const cv::Scalar blue;  ///< Blue
+  static const cv::Scalar white;   ///< White
+  static const cv::Scalar black;   ///< Black
+  static const cv::Scalar red;     ///< Red
+  static const cv::Scalar green;   ///< Green
+  static const cv::Scalar blue;    ///< Blue
+  static const cv::Scalar magenta; ///< Magenta
+  static const cv::Scalar yellow;  ///< Yellow
+  static const cv::Scalar cyan;    ///< Cyan
 };
 
-const cv::Scalar Colors::white = CV_RGB(255, 255, 255);
-const cv::Scalar Colors::black = CV_RGB(  0,   0,   0);
-const cv::Scalar Colors::red   = CV_RGB(255,   0,   0);
-const cv::Scalar Colors::green = CV_RGB(  0, 255,   0);
-const cv::Scalar Colors::blue  = CV_RGB(  0,   0, 255);
+const cv::Scalar Colors::white   = CV_RGB(255, 255, 255);
+const cv::Scalar Colors::black   = CV_RGB(  0,   0,   0);
+const cv::Scalar Colors::red     = CV_RGB(255,   0,   0);
+const cv::Scalar Colors::green   = CV_RGB(  0, 255,   0);
+const cv::Scalar Colors::blue    = CV_RGB(  0,   0, 255);
+const cv::Scalar Colors::magenta = CV_RGB(255,   0, 255);
+const cv::Scalar Colors::yellow  = CV_RGB(255, 255,   0);
+const cv::Scalar Colors::cyan    = CV_RGB(0,   255, 255);
 
 /**
  * @brief Class for holding basic parameters of a font
@@ -450,23 +476,12 @@ regularized_delta(double x,
  * @todo Add support for offsets from all borders
  */
 cv::Mat
-levelset_rect(int h,
-              int w,
-              int l)
+levelset_rect(const cv::Rect & roi,
+              int h,
+              int w)
 {
-  cv::Mat u(h, w, CV_64FC1);
-  u.setTo(cv::Scalar(1));
-  for(int i = 0; i < l; ++i)
-  {
-    u.row(i) = cv::Scalar(-1);
-    u.row(h - i - 1) = cv::Scalar(-1);
-  }
-  for(int j = 0; j < l; ++j)
-  {
-    u.col(j) = cv::Scalar(-1);
-    u.col(w - j - 1) = cv::Scalar(-1);
-  }
-
+  cv::Mat u = cv::Mat::zeros(h, w, CV_64FC1);
+  u(roi) = 1;
   return u;
 }
 
@@ -853,6 +868,57 @@ perona_malik(const std::vector<cv::Mat> & channels,
   return smoothed_img;
 }
 
+void
+onMouse(int event,
+        int x,
+        int y,
+        int f,
+        void * id_ptr)
+{
+  // for the sake of readability, use aliases
+  InteractiveData * id = static_cast<InteractiveData *>(id_ptr);
+  bool & clicked = id -> clicked;
+  cv::Point & P1 = id -> P1;
+  cv::Point & P2 = id -> P2;
+  cv::Rect & roi = id -> roi;
+
+  switch(event)
+  {
+    case CV_EVENT_LBUTTONDOWN:
+      clicked = true;
+      P1.x = x;
+      P1.y = y;
+      P2.x = x;
+      P2.y = y;
+      break;
+    case CV_EVENT_LBUTTONUP:
+      P2.x = x;
+      P2.y = y;
+      clicked = false;
+      break;
+    case CV_EVENT_MOUSEMOVE:
+      if(clicked)
+      {
+        P2.x = x;
+        P2.y = y;
+      }
+      break;
+    default: break;
+  }
+
+  if(clicked)
+  {
+    roi.x = std::min(P1.x, P2.x);
+    roi.y = std::min(P1.y, P2.y);
+    roi.width = std::abs(P1.x - P2.x);
+    roi.height = std::abs(P1.y - P2.y);
+  }
+
+  cv::Mat img = id -> img -> clone();
+  cv::rectangle(img, roi, id -> contour_color);
+  cv::imshow(WINDOW_TITLE, img);
+}
+
 int
 main(int argc,
      char ** argv)
@@ -866,12 +932,13 @@ main(int argc,
   std::string input_filename,
               text_position,
               line_color_str;
-  bool grayscale        = false,
-       write_video      = false,
-       overlay_text     = false,
-       object_selection = false,
-       invert           = false,
-       segment          = false;
+  bool grayscale         = false,
+       write_video       = false,
+       overlay_text      = false,
+       object_selection  = false,
+       invert            = false,
+       segment           = false,
+       rectangle_contour = false;
   TextPosition pos = TextPosition::TopLeft;
   cv::Scalar contour_color = Colors::blue;
 
@@ -895,7 +962,7 @@ main(int argc,
       ("max-steps,N",        po::value<int>(&max_steps) -> default_value(-1),                  "maximum nof iterations (negative means unlimited)")
       ("fps,f",              po::value<double>(&fps) -> default_value(10),                     "video fps")
       ("overlay-pos,P",      po::value<std::string>(&text_position) -> default_value("TL"),    "overlay tex position; allowed only: TL, BL, TR, BR")
-      ("line-color,l",       po::value<std::string>(&line_color_str) -> default_value("blue"), "contour color (allowed only: red, green, blue, black, white)")
+      ("line-color,l",       po::value<std::string>(&line_color_str) -> default_value("blue"), "contour color (allowed only: black, white, R, G, B, Y, M, C")
       ("edge-coef,K",        po::value<double>(&K) -> default_value(10),                       "coefficient for enhancing edge detection in Perona-Malik")
       ("laplacian-coef,L",   po::value<double>(&L) -> default_value(0.25),                     "coefficient in the gradient FD scheme of Perona-Malik (must be [0, 1/4])")
       ("segment-time,T",     po::value<double>(&T) -> default_value(20),                       "number of smoothing steps in Perona-Malik")
@@ -905,6 +972,7 @@ main(int argc,
       ("overlay-text,O",     po::bool_switch(&overlay_text),                                   "add overlay text")
       ("invert-selection,I", po::bool_switch(&invert),                                         "invert selected region (see: select)")
       ("select,s",           po::bool_switch(&object_selection),                               "separate the region encolosed by the contour (adds suffix '_selection')")
+      ("rectangle,R",        po::bool_switch(&rectangle_contour),                              "select rectangle contour interactively")
     ;
     po::variables_map vm;
     po::store(po::command_line_parser(argc, argv).options(desc).run(), vm);
@@ -973,14 +1041,17 @@ main(int argc,
     }
     if(vm.count("line-color"))
     {
-      if     (boost::iequals(line_color_str, "red"))   contour_color = Colors::red;
-      else if(boost::iequals(line_color_str, "green")) contour_color = Colors::green;
-      else if(boost::iequals(line_color_str, "blue"))  contour_color = Colors::blue;
-      else if(boost::iequals(line_color_str, "black")) contour_color = Colors::black;
-      else if(boost::iequals(line_color_str, "white")) contour_color = Colors::white;
+      if     (boost::iequals(line_color_str, "red"))     contour_color = Colors::red;
+      else if(boost::iequals(line_color_str, "green"))   contour_color = Colors::green;
+      else if(boost::iequals(line_color_str, "blue"))    contour_color = Colors::blue;
+      else if(boost::iequals(line_color_str, "black"))   contour_color = Colors::black;
+      else if(boost::iequals(line_color_str, "white"))   contour_color = Colors::white;
+      else if(boost::iequals(line_color_str, "magenta")) contour_color = Colors::magenta;
+      else if(boost::iequals(line_color_str, "yellow"))  contour_color = Colors::yellow;
+      else if(boost::iequals(line_color_str, "cyan"))    contour_color = Colors::cyan;
       else
         msg_exit("Invalid contour color requested.\n"\
-                 "Correct values are: red, green, blue, black, white.");
+                 "Correct values are: red, green, blue, black, white, magenta, yellow, cyan.");
     }
     if(vm.count("laplacian-coef") && (L > 0.25 || L < 0))
       msg_exit("The Laplacian coefficient in Perona-Malik segmentation must be between 0 and 0.25.");
@@ -1014,13 +1085,34 @@ main(int argc,
   const auto heaviside = std::bind(regularized_heaviside, std::placeholders::_1, eps);
   const auto delta = std::bind(regularized_delta, std::placeholders::_1, eps);
 
-//-- Set up the video writer
+//-- Construct the level set
+  cv::Mat u;
+  if(rectangle_contour)
+    {
+//-- Interactive contour selection -- rectangle
+      InteractiveData id(&img, contour_color);
+      cv::startWindowThread();
+      cv::namedWindow(WINDOW_TITLE, cv::WINDOW_NORMAL);
+      cv::setMouseCallback(WINDOW_TITLE, onMouse, &id);
+      cv::imshow(WINDOW_TITLE, img);
+      cv::waitKey();
+      cv::destroyWindow(WINDOW_TITLE);
+
+      if(id.roi.width == 0 || id.roi.height == 0)
+        msg_exit("You must specify the contour with non-zero dimensions");
+      u = levelset_rect(id.roi, h, w);
+    }
+//-- Or use checkerboard contour
+  else
+    u = levelset_checkerboard(h, w);
+
+//-- Set up the video writer (and save the first frame)
   VideoWriterManager vwm;
   if(write_video)
+  {
     vwm = VideoWriterManager(input_filename, img, contour_color, fps, pos, overlay_text);
-
-//-- Construct the level set
-  cv::Mat u = levelset_checkerboard(h, w);
+    vwm.write_frame(u, overlay_text ? "t = 0" : "");
+  }
 
 //-- Split the channels
   std::vector<cv::Mat> channels;
