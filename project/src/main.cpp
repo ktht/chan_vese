@@ -82,31 +82,15 @@
 typedef unsigned char uchar; ///< Short for unsigned char
 typedef unsigned long ulong; ///< Short for unsigned long int
 
-// prototypes
-void
-on_mouse_rect(int event,
-              int x,
-              int y,
-              int,
-              void * id_ptr);
-void
-on_mouse_circ(int event,
-              int x,
-              int y,
-              int,
-              void * id_ptr);
-
 struct InteractiveData
 {
   InteractiveData(cv::Mat * const _img,
-                  const cv::Scalar & _contour_color,
-                  void (* _mouse_cb) (int, int, int, int, void *))
+                  const cv::Scalar & _contour_color)
     : img(_img)
     , contour_color(_contour_color)
     , clicked(false)
     , P1(0, 0)
     , P2(0, 0)
-    , mouse_cb(_mouse_cb)
   {}
 
   virtual ~InteractiveData()
@@ -119,13 +103,47 @@ struct InteractiveData
   get_levelset(int h,
                int w) const = 0;
 
+  virtual void
+  mouse_on(int event,
+           int x,
+           int y) = 0;
+
+  void
+  mouse_on_common(int event,
+                  int x,
+                  int y)
+  {
+    switch(event)
+    {
+      case CV_EVENT_LBUTTONDOWN:
+        clicked = true;
+        P1.x = x;
+        P1.y = y;
+        P2.x = x;
+        P2.y = y;
+        break;
+      case CV_EVENT_LBUTTONUP:
+        P2.x = x;
+        P2.y = y;
+        clicked = false;
+        break;
+      case CV_EVENT_MOUSEMOVE:
+        if(clicked)
+        {
+          P2.x = x;
+          P2.y = y;
+        }
+        break;
+      default: break;
+    }
+  }
+
   cv::Mat * img = nullptr;
   cv::Scalar contour_color;
 
   bool clicked;
   cv::Point P1;
   cv::Point P2;
-  void (* mouse_cb) (int, int, int, int, void *);
 };
 
 struct InteractiveDataRect
@@ -133,7 +151,7 @@ struct InteractiveDataRect
 {
   InteractiveDataRect(cv::Mat * const _img,
                       const cv::Scalar & _contour_color)
-    : InteractiveData(_img, _contour_color, on_mouse_rect)
+    : InteractiveData(_img, _contour_color)
     , roi(0, 0, 0, 0)
   {}
 
@@ -169,6 +187,20 @@ struct InteractiveDataRect
     return roi.width != 0 && roi.height != 0;
   }
 
+  void
+  mouse_on(int event,
+           int x,
+           int y) override
+  {
+    mouse_on_common(event, x, y);
+
+    if(clicked) calc_roi();
+
+    cv::Mat img_cp = img -> clone();
+    cv::rectangle(img_cp, roi, contour_color);
+    cv::imshow(WINDOW_TITLE, img_cp);
+  }
+
   cv::Rect roi;
 };
 
@@ -177,7 +209,7 @@ struct InteractiveDataCirc
 {
   InteractiveDataCirc(cv::Mat * const _img,
                       const cv::Scalar & _contour_color)
-    : InteractiveData(_img, _contour_color, on_mouse_circ)
+    : InteractiveData(_img, _contour_color)
     , radius(0)
   {}
 
@@ -209,6 +241,20 @@ struct InteractiveDataCirc
     cv::Mat u = cv::Mat::zeros(h, w, CV_64FC1);
     cv::circle(u, P1, radius, 1);
     return u;
+  }
+
+  void
+  mouse_on(int event,
+           int x,
+           int y) override
+  {
+    mouse_on_common(event, x, y);
+
+    if(clicked) calc_radius();
+
+    cv::Mat img_cp = img -> clone();
+    cv::circle(img_cp, P1, radius, contour_color);
+    cv::imshow(WINDOW_TITLE, img_cp);
   }
 
   double radius;
@@ -933,73 +979,11 @@ void
 on_mouse(int event,
          int x,
          int y,
-         InteractiveData * id_ptr)
+         int,
+         void * id)
 {
-  bool & clicked = id_ptr -> clicked;
-  cv::Point & P1 = id_ptr -> P1;
-  cv::Point & P2 = id_ptr -> P2;
-
-  switch(event)
-  {
-    case CV_EVENT_LBUTTONDOWN:
-      clicked = true;
-      P1.x = x;
-      P1.y = y;
-      P2.x = x;
-      P2.y = y;
-      break;
-    case CV_EVENT_LBUTTONUP:
-      P2.x = x;
-      P2.y = y;
-      clicked = false;
-      break;
-    case CV_EVENT_MOUSEMOVE:
-      if(clicked)
-      {
-        P2.x = x;
-        P2.y = y;
-      }
-      break;
-    default: break;
-  }
-}
-
-void
-on_mouse_rect(int event,
-              int x,
-              int y,
-              int,
-              void * id_ptr)
-{
-  // for the sake of readability, use aliases
-  InteractiveDataRect * id = static_cast<InteractiveDataRect *>(id_ptr);
-  InteractiveData * parent_id = dynamic_cast<InteractiveData *>(id);
-  on_mouse(event, x, y, parent_id);
-
-  if(id -> clicked) id -> calc_roi();
-
-  cv::Mat img = id -> img -> clone();
-  cv::rectangle(img, id -> roi, id -> contour_color);
-  cv::imshow(WINDOW_TITLE, img);
-}
-
-void
-on_mouse_circ(int event,
-              int x,
-              int y,
-              int,
-              void * id_ptr)
-{
-  // for the sake of readability, use aliases
-  InteractiveDataCirc * id = static_cast<InteractiveDataCirc *>(id_ptr);
-  InteractiveData * parent_id = dynamic_cast<InteractiveData *>(id);
-  on_mouse(event, x, y, parent_id);
-
-  if(id -> clicked) id -> calc_radius();
-
-  cv::Mat img = id -> img -> clone();
-  cv::circle(img, id -> P1, id -> radius, id -> contour_color);
-  cv::imshow(WINDOW_TITLE, img);
+  InteractiveData * ptr = static_cast<InteractiveData *>(id);
+  ptr -> mouse_on(event, x, y);
 }
 
 int
@@ -1180,12 +1164,10 @@ main(int argc,
     cv::startWindowThread();
     cv::namedWindow(WINDOW_TITLE, cv::WINDOW_NORMAL);
 
-    if(rectangle_contour)
-      id = new InteractiveDataRect(&img, contour_color);
-    else if(circle_contour)
-      id = new InteractiveDataCirc(&img, contour_color);
+    if     (rectangle_contour)   id = new InteractiveDataRect(&img, contour_color);
+    else if(circle_contour)      id = new InteractiveDataCirc(&img, contour_color);
 
-    if(id) cv::setMouseCallback(WINDOW_TITLE, id -> mouse_cb, id);
+    if(id) cv::setMouseCallback(WINDOW_TITLE, on_mouse, id);
     cv::imshow(WINDOW_TITLE, img);
     cv::waitKey();
     cv::destroyWindow(WINDOW_TITLE);
