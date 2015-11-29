@@ -857,7 +857,7 @@ separate(const cv::Mat & img,
 }
 
 /**
- * @brief Implementation of Perona-Malik segmentation.
+ * @section perona_malik Perona-Malik segmentation
  *
  * The method implements Perona-Malik segmentation for a multichannel image
  * (the smoothing is applied to each channel separately, hence easily parallelizable).
@@ -1036,7 +1036,149 @@ int
 main(int argc,
      char ** argv)
 {
-/// Performs Chan-Vese segmentation on a given input image
+/// @section csv_segmentation Chan-Sandberg-Vese segmentation
+///
+/// @subsection csv_theory Theory
+/// Since the routine contains too many free parameters which makes it unreasonable to place it into a separate
+/// function, all the code is kept in main(). Here's a rough explanation of what's Chan-Sandberg-Vese all about,
+/// which is based on paper @cite Getreuer2012.
+///
+/// The Chan-Vese method seeks a contour @f$\mathcal{C}@f$ which minimizes the functional
+/// @f[
+///    \mathcal{F}[I;\,\mathcal{C},\,c_{1},\,c_{2}]=
+///        \mu\mathrm{Length}(\mathcal{C})+
+///        \nu\mathrm{Area}(\mathcal{C})+
+///        \lambda_{1}\int_{\mathcal{C}}|I-c_{1}|^{2}\,\mathrm{d}x\mathrm{d}y+
+///        \lambda_{2}\int_{\Omega\setminus\mathcal{C}}|I-c_{2}|^{2}\,\mathrm{d}x\mathrm{d}y\,,
+/// @f]
+/// where
+///    - the single-channel image @f$I=I(x,\,y)@f$ is defined on the region @f$\Omega=[0,\,a]\times[0,\,b]@f$;
+///         - regions in the integral limits, @f$\mathcal{C}@f$ and @f$\Omega\setminus\mathcal{C}@f$,
+///           denote the region enclosed by the contour and the region outside the contour, respectively;
+///    -  @f$\mu(=0.5)@f$, @f$\nu(=0)@f$, @f$\lambda_{1}(=1)@f$ and @f$\lambda_{2}(=1)@f$ are free parameters,
+///       whereby only @f$\nu@f$ can be negative (default values in parentheses);
+///    - @f$c_{1}@f$ and @f$c_{2}@f$ are constants that depend on the information of the regions enclosed by and
+///      outside of the contour.
+///
+/// Instead of dealing with @f$\mathcal{C}@f$ explicitly, it's custom to define a level set function @f$u(x,\,y;\,t)@f$
+/// so that its zero-level iso-surface (also: zero level set) coincides with the contour:
+/// @f$\mathcal{C}=\{\Omega\ni(x,\,y)\,:\,u(x,\,y;\,t)=0\forall t\}@f$. This in turn leads us to a new definition
+/// of the functional:
+/// @f[
+///      \mathcal{F}[I;\,u,\,c_{1},\,c_{2}] =
+///             \mu\left(\int_{\Omega}|\nabla H(u)|\,\mathrm{d}x\mathrm{d}y\right)^{p}+
+///             \nu\int_{\Omega}H(u)\,\mathrm{d}x\mathrm{d}y+
+///             \lambda_{1}\int_{\Omega}|I-c_{1}|^{2}H(u)\,\mathrm{d}x\mathrm{d}y+
+///             \lambda_{2}\int_{\Omega}|I-c_{2}|^{2}(1-H(u))\,\mathrm{d}x\mathrm{d}y\,.
+/// @f]
+/// In our implementation we've picked @f$p=1@f$, so that the first integral reduces to
+/// @f[
+///      \left.\mu\left(\int_{\Omega}|\nabla H(u)|\,\mathrm{d}x\mathrm{d}y\right)^{p}\right|_{p=1}=
+///       \mu\int_{\Omega}\delta(u)|\nabla u|\,\mathrm{d}x\mathrm{d}y\,,
+/// @f]
+/// where @f$H(x)@f$ and @f$\delta(x)=H'(x)@f$ are Heaviside's step and Dirac's delta functions.
+/// In this prescription @f$c_{1}@f$ and @f$c_{2}@f$ are now region averages and take the following form:
+/// @f[
+///      c_{1}=\frac{\int_{\Omega}IH(u)\mathrm{d}x\mathrm{d}y}{\int_{\Omega}H(u)\,\mathrm{d}x\mathrm{d}y}\,,\quad
+///      c_{2}=\frac{\int_{\Omega}I(1-H(u))\mathrm{d}x\mathrm{d}y}{\int_{\Omega}(1 - H(u))\,\mathrm{d}x\mathrm{d}y}\,.
+/// @f]
+/// For practical reasons the functions are replaced by smooth/regularized versions (see regularized_heaviside() and
+/// regularized_delta()):
+/// @f[
+///      H_{\epsilon}(x)=\frac{1}{2}\left[1+\frac{2}{\pi}\arctan\left(\frac{x}{\epsilon}\right)\right]\,,\quad
+///      \delta_{\epsilon}(x)=\frac{\epsilon}{\pi\left(\epsilon^{2}+x^{2}\right)}\,,
+/// @f]
+/// with @f$\epsilon=1@f$ by default.
+/// The interpretation of the functional @f$\mathcal{F}@f$ is the following:
+///     - the first term penalizes the length of @f$\mathcal{C}@f$;
+///     - the second term penalizes the area enclosed by the curve;
+///     - the 3rd and 4th term penalize region averages inside and outside of the contour; in other words
+///       it keeps track of the discrepancy between the two regions.
+///
+/// A stationary solution to @f$\mathcal{F}@f$, or equivalently the equation of motion (e.o.m) for the contour,
+/// can be found by solving it with Euler-Lagrange equation, which results in
+/// @f[
+///    u_{t} = \delta_{\epsilon}(u)\left[\mu\kappa-\nu-\lambda_{1}(I-c_{1})^{2}+\lambda_{2}(I-c_{2})^{2}\right]\,,
+/// @f]
+/// where @f$\kappa=\nabla\cdot\left(\frac{\nabla u}{|\nabla u|}\right)@f$ is curvature of @f$u@f$.
+///
+/// If the (still 2D) image has @f$I@f$ has @f$N@f$ channels @f$\{I_{i}(x,\,y)\}_{i=1}^{N}@f$, there should still
+/// be a single level set @f$u@f$, which leads us the following functional:
+/// @f[
+///    \mathcal{F}[I;\,u,\,\mathbf{c_{1}},\,\mathbf{c}_{2}]=
+///      \mu\int_{\Omega}|\nabla H(u)|\mathrm{d}x\mathrm{d}y+
+///      \nu\int_{\Omega}H(u)\mathrm{d}x\mathrm{d}y+
+///      \int_{\Omega}\frac{1}{N}\sum_{i=1}^{N}\lambda_{1}^{(i)}|I_{i}-c_{1}^{(i)}|^{2}H(u)\mathrm{d}x\mathrm{d}y+
+///      \int_{\Omega}\frac{1}{N}\sum_{i=1}^{N}\lambda_{2}^{(i)}|I_{i}-c_{2}^{(i)}|^{2}(1-H(u))\mathrm{d}x\mathrm{d}y\,.
+/// @f]
+/// Variables @f$\{c_{1}^{(i)},\,c_{2}^{(i)}\}_{i=1}^{N}@f$ retain their original meaning,
+/// @f[
+///     c_{1}^{(i)}=\frac{\int_{\Omega}I_{i}H(u)\mathrm{d}x\mathrm{d}y}{\int_{\Omega}H(u)\mathrm{d}x\mathrm{d}y}\,,\quad
+///     c_{2}^{(i)}=\frac{\int_{\Omega}I_{i}(1-H(u))\mathrm{d}x\mathrm{d}y}{\int_{\Omega}(1-H(u))\mathrm{d}x\mathrm{d}y}
+///     \quad\forall i=\{1,\,\ldots,\,N\}\,;
+/// @f]
+/// the constants @f$\{\lambda_{1}^{(i)},\,\lambda_{2}^{(i)}\}_{i=1}^{N}@f$ are defined for each channel separately.
+/// This implementation consider only grayscale (@f$N=1@f$) and RGB (@f$N=3@f$) images, for which @f$\lambda_{i}=1@f$
+/// by default for any @f$i@f$-th channel.
+/// The corresponding e.o.m reads
+/// @f[
+///      u_{t}=\delta_{\epsilon}(u)\left[\mu\kappa-\nu-
+///            \frac{1}{N}\sum_{i=1}^{N}\lambda_{1}^{(i)}\left(I_{i}-c_{1}^{(i)}\right)^{2}+
+///            \frac{1}{N}\sum_{i=1}^{N}\lambda_{2}^{(i)}\left(I_{i}-c_{2}^{(i)}\right)^{2}\right]\,.
+/// @f]
+///
+/// @subsection csv_numsch Numerical scheme
+///
+/// Finite difference expression for the curvature @f$\kappa@f$ is explained in curvature(). The advantage of this scheme
+/// is that we only need nearest neighbouring points at current point while keeping the derivative centered at current point,
+/// whereas naive implementation would use more distant points. Since we're dealing with a finite domain and therefore
+/// boundaries, we don't have to "extend" the region by two pixels each direction. Instead, we just duplicate border pixels.
+///
+/// Rest of the calculation is actually quite straightforward -- the zero level set is iteratively updated with
+/// @f[
+///      u_{i,j}^{n+1}=u_{i,j}^{n}+\mathrm{d}t\;\delta_{\epsilon}(u_{i,j}^{n})\left[\kappa_{i,j}^{n}-\nu-
+///      \frac{1}{N}\sum_{k=1}^N\lambda_{1}^{(k)}\left(I_{i,j}-c_{1}^{n,(k)}\right)+
+///      \frac{1}{N}\sum_{k=1}^N\lambda_{2}^{(k)}\left(I_{i,j}-c_{2}^{n,(k)}\right)\right]\,.
+/// @f]
+/// The method is inherently implicit and is implemented with ordinary matrix operations. The first term in the brackets
+/// has already been discussed; the second term is trivial; the final two terms are explained in region_variance() and
+/// variance_penalty().
+///
+/// There are various ways to initialize the level set, and since we're solving a differential equation, different initial
+/// conditions lead to different outcome. The simplest way is to let the user draw either rectangular or circular contour.
+/// The level set will be evaluated with @f$+1@f$'s inside the contour and with @f$-1@f$'s outside of it.
+/// A more optimal (here the default) contour would be checkerboard
+/// @f[
+///      u(i,\,j;\,0)=\sin\left(\frac{\pi}{5}i\right)\sin\left(\frac{\pi}{5}j\right)\,,
+/// @f]
+/// because it converges faster to a solution (see levelset_checkerboard()). The solution is reached when the maximum number
+/// of iterations, @f$T_\max@f$, is reached or when @f$||u_{i,j}^{n+1}-u_{i,j}^{n}||_{2}\leqslant\delta ||\bar{I}||_{2}@f$,
+/// where the subscript denotes @f$L_{2}@f$-norm, @f$\delta=(10^{-3})@f$ is tolerance parameter and @f$\bar{I}@f$ is
+/// the intensity average in the image (averaged across the channels).
+///
+/// @subsection csv_summary Summary
+///
+/// The main logic described above starts with a timestep loop (look for the comment below); everything else preciding
+/// that is actually sugar coating just to make the program usable for anyone.
+///
+/// If it isn't clear from above text or the code below, here is the list of variables which the user can pass as an argument
+/// (the default values in the parentheses): @f$\mu(=0.5)@f$, @f$\nu(=0)@f$, @f$\mathrm{d}t(=1)@f$,
+/// @f$\lambda_{1}^{(i)}(=1)@f$ and @f$\lambda_{1}^{(i)}(=1)@f$ @f$\forall i=1\ldots N@f$, @f$\epsilon(=1)@f$,
+/// @f$\delta(=10^{-3})@f$, @f$T_\max@f$(=INT_MAX), @f$N(=1\;\mbox{or}\;3)@f$ (number of channels).
+///
+/// Other general options include:
+///    - object selection (-s) -- the region enclosed by the contour will be cut out and placed onto white canvas and saved;
+///    - region inversion (-I) -- sometimes the ROI is inverted; there's an option to circumvent that (goes with -s option);
+///    - video output (-V) -- see contour evolution in a video (*.avi, the same filename as the image; see VideoWriterManager);
+///    - overlay text (-O) -- puts overlay text (timesteps) on the video (goes with the previous option);
+///    - frame rate (-f) -- frame rate of the video;
+///    - line color (-l) -- color of the contour line (see Colors);
+///    - rectangular (-R) or circular (-C) contour -- lets the user draw it on the image (see InteractiveData and its subclasses);
+///    - grayscale image (-g) -- sometimes we just want do perform it on a black-white image, but the original source is RGB.
+///
+/// For Perona-Malik-specific parameters @f$K@f$, @f$L@f$, @f$T@f$, see perona_malik().
+///
+/// @sa curvature, region_variance, variance_penalty, levelset_checkerboard, VideoWriterManager, InteractiveData, Colors, perona_malik
 
   double mu, nu, eps, tol, dt, fps, K, L, T;
   int max_steps;
@@ -1066,7 +1208,7 @@ main(int argc,
     desc.add_options()
       ("help,h",                                                                               "this message")
       ("input,i",            po::value<std::string>(&input_filename),                          "input image")
-      ("mu",                 po::value<double>(&mu) -> default_value(0.5),                     "length penalty parameter")
+      ("mu",                 po::value<double>(&mu) -> default_value(0.5),                     "length penalty parameter (must be positive or zero)")
       ("nu",                 po::value<double>(&nu) -> default_value(0),                       "area penalty parameter")
       ("dt",                 po::value<double>(&dt) -> default_value(1),                       "timestep")
       ("lambda1",            po::value<std::vector<double>>(&lambda1) -> multitoken(),         "penalty of variance inside the contour (default: 1's)")
@@ -1104,6 +1246,8 @@ main(int argc,
       msg_exit("Error: file \"" + input_filename + "\" does not exists!");
     if(vm.count("dt") && dt <= 0)
       msg_exit("Cannot have negative or zero timestep: " + std::to_string(dt) + ".");
+    if(vm.count("mu") && mu < 0)
+      msg_exit("Length penalty parameter cannot be negative: " + std::to_string(mu) + ".");
     if(vm.count("lambda1"))
     {
       if(grayscale && lambda1.size() != 1)

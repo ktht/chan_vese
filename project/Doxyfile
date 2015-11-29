@@ -10,3 +10,4 @@ GENERATE_LATEX         = NO
 CALL_GRAPH             = YES
 SOURCE_BROWSER         = YES
 CITE_BIB_FILES         = doc/sources.bib
+MATHJAX_EXTENSIONS     = TeX/AMSsymbols
