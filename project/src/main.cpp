@@ -9,16 +9,6 @@
 #include <limits> // std::numeric_limits<>
 #include <map> // std::map<>
 
-#include <opencv2/imgproc/imgproc.hpp> // cv::cvtColor(), CV_BGR2RGB cv::threshold(),
-                                       // cv::findContours(), cv::drawContours(),
-                                       // cv::THRESH_BINARY, CV_RETR_TREE, CV_CHAIN_APPROX_SIMPLE,
-                                       // cv::BORDER_REPLICATE, cv::filter2D()
-#include <opencv2/highgui/highgui.hpp> // cv::imread(), CV_LOAD_IMAGE_COLOR, cv::WINDOW_NORMAL,
-                                       // cv::imshow(), cv::waitKey(), cv::namedWindow()
-
-                                       // cv::Mat, cv::Scalar, cv::Vec4i, cv::Point, cv::norm(),
-                                       // cv::NORM_L2, CV_64FC1, CV_64FC1, cv::Mat_<>, ParallelLoopBody
-
 #include <boost/math/special_functions/sign.hpp> // boost::math::sign()
 #include <boost/algorithm/string/predicate.hpp> // boost::iequals()
 #include <boost/algorithm/string/join.hpp> // boost::algorithm::join()
@@ -54,6 +44,14 @@
 #include <sys/ioctl.h> // struct winsize, ioctl(), TIOCGWINSZ
 #endif
 
+#include "ChanVeseCommon.hpp"        // ChanVese::
+#include "InteractiveDataCirc.hpp"   // InteractiveDataCirc
+#include "InteractiveDataRect.hpp"   // InteractiveDataRect
+#include "VideoWriterManager.hpp"    // VideoWriterManager
+#include "ParallelPixelFunction.hpp" // ParallelPixelFunction
+
+                                     // Everything above comes with cv::
+
 /**
  * @file
  * @todo
@@ -77,516 +75,21 @@
  * OpenCV interface.
  */
 
-#define WINDOW_TITLE "Select contour" ///< Title of the window at startup
+const cv::Scalar ChanVese::Colors::white   = CV_RGB(255, 255, 255);
+const cv::Scalar ChanVese::Colors::black   = CV_RGB(  0,   0,   0);
+const cv::Scalar ChanVese::Colors::red     = CV_RGB(255,   0,   0);
+const cv::Scalar ChanVese::Colors::green   = CV_RGB(  0, 255,   0);
+const cv::Scalar ChanVese::Colors::blue    = CV_RGB(  0,   0, 255);
+const cv::Scalar ChanVese::Colors::magenta = CV_RGB(255,   0, 255);
+const cv::Scalar ChanVese::Colors::yellow  = CV_RGB(255, 255,   0);
+const cv::Scalar ChanVese::Colors::cyan    = CV_RGB(0,   255, 255);
 
-typedef unsigned char uchar; ///< Short for unsigned char
-typedef unsigned long ulong; ///< Short for unsigned long int
-
-/**
- * @brief Abstract class holding necessary information to let the user specify the
- *        initial contour.
- * @sa InteractiveDataRect, InteractiveDataCirc
- */
-struct InteractiveData
-{
-  /**
-   * @brief Simple constructor.
-   * @param _img           Image onto which the contour will be drawn
-   * @param _contour_color Contour color
-   */
-  InteractiveData(cv::Mat * const _img,
-                  const cv::Scalar & _contour_color)
-    : img(_img)
-    , contour_color(_contour_color)
-    , clicked(false)
-    , P1(0, 0)
-    , P2(0, 0)
-  {}
-
-  virtual ~InteractiveData()
-  {}
-
-  /**
-   * @brief  Checks whether the contour specified by the user is valid or not
-   * @return True, if it's valid, false otherwise
-   */
-  virtual bool
-  is_ok() const = 0;
-
-  /**
-   * @brief Returns level set based on the contour specified by the user.
-   *        The region enclosed by the contour is filled with ones;
-   *        the region outside the contour is filled with zeros.
-   * @param h Height of the requested level set
-   * @param w Width of the requested level set
-   * @return The level set
-   */
-  virtual cv::Mat
-  get_levelset(int h,
-               int w) const = 0;
-
-  /**
-   * @brief Mouse callback function.
-   *        In principle is responsible for displaying the original image and
-   *        drawing the contour onto it
-   * @param event Event number
-   * @param x     x-coordinate of the mouse in the window
-   * @param y     y-coordinate of the mouse in the window
-   * @sa on_mouse, mouse_on_common
-   */
-  virtual void
-  mouse_on(int event,
-           int x,
-           int y) = 0;
-
-  /**
-   * @brief Common logic in the callback functions implemented by the subclasses:
-   *          - if the left button of the mouse is pressed, its position is recorded for both P1 and P2
-   *          - if the left button is released, P2 is registered
-   *          - in order to show the contour while left button is pressed and moved, we save
-   *            the position only into P2
-   * @param event Event number
-   * @param x     x-coordinate of the mouse in the window
-   * @param y     y-coordinate of the mouse in the window
-   */
-  void
-  mouse_on_common(int event,
-                  int x,
-                  int y)
-  {
-    switch(event)
-    {
-      case CV_EVENT_LBUTTONDOWN:
-        clicked = true;
-        P1.x = x;
-        P1.y = y;
-        P2.x = x;
-        P2.y = y;
-        break;
-      case CV_EVENT_LBUTTONUP:
-        P2.x = x;
-        P2.y = y;
-        clicked = false;
-        break;
-      case CV_EVENT_MOUSEMOVE:
-        if(clicked)
-        {
-          P2.x = x;
-          P2.y = y;
-        }
-        break;
-      default: break;
-    }
-  }
-
-protected:
-  cv::Mat * img = nullptr; ///< Pointer to the original image onto which the contour will be drawn
-  cv::Scalar contour_color; ///< Color of the contour that will be drawn on the image
-
-  bool clicked; ///< A boolean that keeps track whether the mouse button is pressed down or not
-  cv::Point P1; ///< Coordinate of the mouse while its left button is pressed down
-  cv::Point P2; ///< Coordinate of the mouse while its left button is released
-};
-
-/**
- * @brief Implements InteractiveData class; the callback function lets the user
- *        draw a rectangular contour.
- */
-struct InteractiveDataRect
-  : public InteractiveData
-{
-  /**
-   * @brief Simple constructor; initializes rectangular contour
-   * @param _img           Image onto which the contour will be drawn
-   * @param _contour_color Contour color
-   */
-  InteractiveDataRect(cv::Mat * const _img,
-                      const cv::Scalar & _contour_color)
-    : InteractiveData(_img, _contour_color)
-    , roi(0, 0, 0, 0)
-  {}
-
-  bool
-  is_ok() const override
-  {
-    return roi.width != 0 && roi.height != 0;
-  }
-
-  cv::Mat
-  get_levelset(int h,
-               int w) const override
-  {
-    cv::Mat u = cv::Mat::zeros(h, w, CV_64FC1);
-    u(roi) = 1;
-    return u;
-  }
-
-  void
-  mouse_on(int event,
-           int x,
-           int y) override
-  {
-    mouse_on_common(event, x, y);
-
-    if(clicked)
-    {
-      if(P1.x < 0) P1.x = 0;
-      if(P2.x < 0) P2.x = 0;
-      if(P1.x > img -> cols) P1.x = img -> cols;
-      if(P2.x > img -> cols) P2.x = img -> cols;
-      if(P1.y < 0) P1.y = 0;
-      if(P2.y < 0) P2.y = 0;
-      if(P1.y > img -> rows) P1.y = img -> rows;
-      if(P2.y > img -> rows) P2.y = img -> rows;
-
-      roi.x = std::min(P1.x, P2.x);
-      roi.y = std::min(P1.y, P2.y);
-      roi.width = std::abs(P1.x - P2.x);
-      roi.height = std::abs(P1.y - P2.y);
-    }
-
-    cv::Mat img_cp = img -> clone();
-    cv::rectangle(img_cp, roi, contour_color);
-    cv::imshow(WINDOW_TITLE, img_cp);
-  }
-
-private:
-  cv::Rect roi; ///< Rectangular contour represented by OpenCV's object
-};
-
-/**
- * @brief Implements InteractiveData class; the callback function lets the user
- *        draw a circular contour.
- */
-struct InteractiveDataCirc
-  : public InteractiveData
-{
-  /**
-   * @brief Simple constructor; initializes rectangular contour
-   * @param _img           Image onto which the contour will be drawn
-   * @param _contour_color Contour color
-   */
-  InteractiveDataCirc(cv::Mat * const _img,
-                      const cv::Scalar & _contour_color)
-    : InteractiveData(_img, _contour_color)
-    , radius(0)
-  {}
-
-  bool
-  is_ok() const override
-  {
-    return radius > 0;
-  }
-
-  cv::Mat
-  get_levelset(int h,
-               int w) const override
-  {
-    cv::Mat u = cv::Mat::zeros(h, w, CV_64FC1);
-    cv::circle(u, P1, radius, 1);
-    return u;
-  }
-
-  void
-  mouse_on(int event,
-           int x,
-           int y) override
-  {
-    mouse_on_common(event, x, y);
-
-    if(clicked) radius = cv::norm(P1 - P2);
-
-    cv::Mat img_cp = img -> clone();
-    cv::circle(img_cp, P1, radius, contour_color);
-    cv::imshow(WINDOW_TITLE, img_cp);
-  }
-
-private:
-  double radius; ///< Radius of the circular contour
-};
-
-/**
- * @brief The Region enum
- * @sa region_variance
- */
-enum Region { Inside, Outside };
-
-/**
- * @brief Enum for specifying overlay text in the image
- * @sa overlay_color
- */
-enum TextPosition { TopLeft, TopRight, BottomLeft, BottomRight };
-
-/**
- * @brief The Colors struct
- */
-struct Colors
-{
-  static const cv::Scalar white;   ///< White
-  static const cv::Scalar black;   ///< Black
-  static const cv::Scalar red;     ///< Red
-  static const cv::Scalar green;   ///< Green
-  static const cv::Scalar blue;    ///< Blue
-  static const cv::Scalar magenta; ///< Magenta
-  static const cv::Scalar yellow;  ///< Yellow
-  static const cv::Scalar cyan;    ///< Cyan
-};
-
-const cv::Scalar Colors::white   = CV_RGB(255, 255, 255);
-const cv::Scalar Colors::black   = CV_RGB(  0,   0,   0);
-const cv::Scalar Colors::red     = CV_RGB(255,   0,   0);
-const cv::Scalar Colors::green   = CV_RGB(  0, 255,   0);
-const cv::Scalar Colors::blue    = CV_RGB(  0,   0, 255);
-const cv::Scalar Colors::magenta = CV_RGB(255,   0, 255);
-const cv::Scalar Colors::yellow  = CV_RGB(255, 255,   0);
-const cv::Scalar Colors::cyan    = CV_RGB(0,   255, 255);
-
-/**
- * @brief Class for holding basic parameters of a font
- */
-class FontParameters
-{
-public:
-  FontParameters()
-    : face(CV_FONT_HERSHEY_PLAIN)
-    , scale(0.8)
-    , thickness(1)
-    , type(CV_AA)
-    , baseline(0)
-  {}
-  /**
-   * @brief FontParameters constructor
-   * @param font_face      Font (type)face, expecting CV_FONT_HERSHEY_*
-   * @param font_scale     Font size (relative; multiplied with base font size)
-   * @param font_thickness Font thickness
-   * @param font_linetype  Font line type, e.g. 8 (8-connected), 4 (4-connected)
-   *                       or CV_AA (antialiased font)
-   * @param font_baseline  Bottom padding in y-direction?
-   */
-  FontParameters(int font_face,
-                 double font_scale,
-                 int font_thickness,
-                 int font_linetype,
-                 int font_baseline)
-    : face(font_face)
-    , scale(font_scale)
-    , thickness(font_thickness)
-    , type(font_linetype)
-    , baseline(font_baseline)
-  {}
-  int face;      ///< Font (type)face
-  double scale;  ///< Font size (relative; multiplied with base font size)
-  int thickness; ///< Font thickness
-  int type;      ///< Font line type
-  int baseline;  ///< Bottom padding in y-direction?
-};
-
-/**
- * @brief Finite difference kernels
- * @sa curvature
- */
-struct Kernel
-{
-  static const cv::Mat fwd_x; ///< Forward difference in the x direction, @f$\Delta_x^+=f_{i+1,j}-f_{i,j}@f$
-  static const cv::Mat fwd_y; ///< Forward difference in the y direction, @f$\Delta_y^+=f_{i,j+1}-f_{i,j}@f$
-  static const cv::Mat bwd_x; ///< Backward difference in the x direction, @f$\Delta_x^-=f_{i,j}-f_{i-1,j}@f$
-  static const cv::Mat bwd_y; ///< Backward difference in the y direction, @f$\Delta_y^-=f_{i,j}-f_{i,j-1}@f$
-  static const cv::Mat ctr_x; ///< Central difference in the x direction, @f$\Delta_x^0=\frac{f_{i+1,j}-f_{i-1,j}}{2}@f$
-  static const cv::Mat ctr_y; ///< Central difference in the y direction, @f$\Delta_y^0=\frac{f_{i,j+1}-f_{i,j-1}}{2}@f$
-};
-
-const cv::Mat Kernel::fwd_x = (cv::Mat_<double>(1, 3) << 0,-1,1);
-const cv::Mat Kernel::fwd_y = (cv::Mat_<double>(3, 1) << 0,-1,1);
-const cv::Mat Kernel::bwd_x = (cv::Mat_<double>(1, 3) << -1,1,0);
-const cv::Mat Kernel::bwd_y = (cv::Mat_<double>(3, 1) << -1,1,0);
-const cv::Mat Kernel::ctr_x = (cv::Mat_<double>(1, 3) << -0.5,0,0.5);
-const cv::Mat Kernel::ctr_y = (cv::Mat_<double>(3, 1) << -0.5,0,0.5);
-
-/**
- * @brief Class for calculating function values on the level set in parallel.
- *        Specifically, meant for taking regularized delta function on the level set.
- *
- * Credit to 'maythe4thbewithu' for the idea: http://goo.gl/jPtLI2
- */
-class ParallelPixelFunction : public cv::ParallelLoopBody
-{
-public:
-  /**
-   * @brief Constructor
-   * @param _data  Level set
-   * @param _w     Width of the level set matrix
-   * @param _func  Any function
-   */
-  ParallelPixelFunction(cv::Mat & _data,
-                        int _w,
-                        std::function<double(double)> _func)
-    : data(_data)
-    , w(_w)
-    , func(_func)
-  {}
-  /**
-   * @brief Needed by cv::parallel_for_
-   * @param r Range of all indices (as if the level set is flatten)
-   */
-  virtual void operator () (const cv::Range & r) const
-  {
-    for(int i = r.start; i != r.end; ++i)
-      data.at<double>(i / w, i % w) = func(data.at<double>(i / w, i % w));
-  }
-
-private:
-  cv::Mat & data;
-  const int w;
-  const std::function<double(double)> func;
-};
-
-/**
- * @brief A wrapper for cv::VideoWriter
- *        Holds information about underlying image, optional overlay text position,
- *        contour colors and frame rate
- */
-class VideoWriterManager
-{
-public:
-  VideoWriterManager() = default;
-  /**
-   * @brief VideoWriterManager constructor
-   *        Needs minimum information to create a video file
-   * @param input_filename  File name of the original image, the file extension of which
-   *                        will be renamed to '.avi'
-   * @param _img            Underlying image
-   * @param _contour_color  Color of the contour
-   * @param fps             Frame rate (frames per second)
-   * @param _pos            Overlay text position
-   * @param _enable_overlay Enables text overlay
-   * @sa TextPosition
-   */
-  VideoWriterManager(const std::string & input_filename,
-                     const cv::Mat & _img,
-                     const cv::Scalar & _contour_color,
-                     double fps,
-                     TextPosition _pos,
-                     bool _enable_overlay)
-    : img(_img)
-    , contour_color(_contour_color)
-    , font({CV_FONT_HERSHEY_PLAIN, 0.8, 1, 0, CV_AA})
-    , pos(_pos)
-    , enable_overlay(_enable_overlay)
-  {
-    const std::string video_filename = boost::filesystem::change_extension(input_filename, "avi").string();
-    vw = cv::VideoWriter(video_filename, CV_FOURCC('X','V','I','D'), fps, img.size());
-  }
-  /**
-   * @brief Writes the frame with a given zero level set to a video file
-   * @param u            Level set
-   * @param overlay_text Optional overlay text
-   */
-  void
-  write_frame(const cv::Mat & u,
-              const std::string & overlay_text = "")
-  {
-    cv::Mat nw_img = img.clone();
-    draw_contour(nw_img, u);
-    if(enable_overlay)
-    {
-      cv::Scalar color;
-      cv::Point p;
-      overlay_color(overlay_text, color, p);
-      cv::putText(nw_img, overlay_text, p, font.face, font.scale, color, font.thickness, font.type);
-    }
-    vw.write(nw_img);
-  }
-
-private:
-  cv::VideoWriter vw;
-  cv::Mat img;
-  cv::Scalar contour_color;
-  FontParameters font;
-  TextPosition pos;
-  bool enable_overlay;
-
-  /**
-   * @brief Draws the zero level set on a given image
-   * @param dst        The image where the contour is placed.
-   * @param u          The level set, the zero level of which is plotted.
-   * @param line_color Contour line color
-   * @return 0
-   * @sa levelset2contour
-   */
-  int
-  draw_contour(cv::Mat & dst,
-               const cv::Mat & u)
-  {
-    cv::Mat mask(img.size(), CV_8UC1);
-    std::vector<std::vector<cv::Point>> cs;
-    std::vector<cv::Vec4i> hier;
-
-    cv::Mat u_cp(u.size(), CV_8UC1);
-    u.convertTo(u_cp, u_cp.type());
-    cv::threshold(u_cp, mask, 0, 1, cv::THRESH_BINARY);
-    cv::findContours(mask, cs, hier, CV_RETR_TREE, CV_CHAIN_APPROX_SIMPLE);
-
-    int idx = 0;
-    for(; idx >= 0; idx = hier[idx][0])
-      cv::drawContours(dst, cs, idx, contour_color, 1, 8, hier);
-
-    return 0;
-  }
-  /**
-   * @brief Finds proper font color for overlay text
-   *        The color is determined by the average intensity of the ROI where
-   *        the text is placed. The function also finds correct bottom left point
-   *        of the text area
-   * @param img    3-channel image where the text is placed
-   * @param txt    The text itself
-   * @param pos    Position in the image (for possibilities: top left corner,
-   *               top right, bottom left or bottom right)
-   * @param fparam Font parameters that help to determine the dimensions of ROI
-   * @param color  Reference to the color variable
-   * @param p      Reference to the bottom left point of the text area
-   * @return Black color, if the background is white enough; otherwise white color
-   * @todo add some check if the text width/height exceeds image dimensions
-   * @sa TextPosition, FontParameters
-   */
-  int
-  overlay_color(const std::string txt,
-                cv::Scalar & color,
-                cv::Point & p)
-  {
-
-    const int threshold = 105; // bias towards black font
-
-    const cv::Size txt_sz = cv::getTextSize(txt, font.face, font.scale, font.thickness, &font.baseline);
-    const int padding = 5;
-    cv::Point q;
-
-    if(pos == TextPosition::TopLeft)
-    {
-      p = cv::Point(padding, padding + txt_sz.height);
-      q = cv::Point(padding, padding);
-    }
-    else if(pos == TextPosition::TopRight)
-    {
-      p = cv::Point(img.cols - padding - txt_sz.width, padding + txt_sz.height);
-      q = cv::Point(img.cols - padding - txt_sz.width, padding);
-    }
-    else if(pos == TextPosition::BottomLeft)
-    {
-      p = cv::Point(padding, img.rows - padding);
-      q = cv::Point(padding, img.rows - padding - txt_sz.height);
-    }
-    else if(pos == TextPosition::BottomRight)
-    {
-      p = cv::Point(img.cols - padding - txt_sz.width, img.rows - padding);
-      q = cv::Point(img.cols - padding - txt_sz.width, img.rows - padding - txt_sz.height);
-    }
-
-    cv::Scalar avgs = cv::mean(img(cv::Rect(q, txt_sz)));
-    const double intensity_avg = 0.114*avgs[0] + 0.587*avgs[1] + 0.299*avgs[2];
-    color = 255 - intensity_avg < threshold ? Colors::black : Colors::white;
-    return 0;
-  }
-};
+const cv::Mat ChanVese::Kernel::fwd_x = (cv::Mat_<double>(1, 3) << 0,-1,1);
+const cv::Mat ChanVese::Kernel::fwd_y = (cv::Mat_<double>(3, 1) << 0,-1,1);
+const cv::Mat ChanVese::Kernel::bwd_x = (cv::Mat_<double>(1, 3) << -1,1,0);
+const cv::Mat ChanVese::Kernel::bwd_y = (cv::Mat_<double>(3, 1) << -1,1,0);
+const cv::Mat ChanVese::Kernel::ctr_x = (cv::Mat_<double>(1, 3) << -0.5,0,0.5);
+const cv::Mat ChanVese::Kernel::ctr_y = (cv::Mat_<double>(3, 1) << -0.5,0,0.5);
 
 /**
  * @brief Calculates the terminal/console width.
@@ -718,12 +221,12 @@ region_variance(const cv::Mat & img,
                 const cv::Mat & u,
                 int h,
                 int w,
-                Region region,
+                ChanVese::Region region,
                 std::function<double(double)> heaviside)
 {
   double nom = 0.0,
          denom = 0.0;
-  const auto H = (region == Region::Inside)
+  const auto H = (region == ChanVese::Region::Inside)
                   ? heaviside
                   : [&heaviside](double x) -> double { return 1 - heaviside(x); };
 
@@ -809,10 +312,10 @@ curvature(const cv::Mat & u,
   const double eta2 = std::pow(eta, 2);
   cv::Mat upx (h, w, CV_64FC1), upy (h, w, CV_64FC1),
           ucx (h, w, CV_64FC1), ucy (h, w, CV_64FC1);
-  cv::filter2D(u, upx, CV_64FC1, Kernel::fwd_x, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
-  cv::filter2D(u, upy, CV_64FC1, Kernel::fwd_y, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
-  cv::filter2D(u, ucx, CV_64FC1, Kernel::ctr_x, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
-  cv::filter2D(u, ucy, CV_64FC1, Kernel::ctr_y, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
+  cv::filter2D(u, upx, CV_64FC1, ChanVese::Kernel::fwd_x, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
+  cv::filter2D(u, upy, CV_64FC1, ChanVese::Kernel::fwd_y, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
+  cv::filter2D(u, ucx, CV_64FC1, ChanVese::Kernel::ctr_x, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
+  cv::filter2D(u, ucy, CV_64FC1, ChanVese::Kernel::ctr_y, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
 
   double * const upx_ptr = reinterpret_cast<double *>(upx.data);
   double * const upy_ptr = reinterpret_cast<double *>(upy.data);
@@ -829,8 +332,8 @@ curvature(const cv::Mat & u,
                              std::sqrt(std::pow(upy_ptr[i * w + j], 2) + std::pow(ucy_ptr[i * w + j], 2) + eta2);
       }
 
-  cv::filter2D(upx, upx, CV_64FC1, Kernel::bwd_x, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
-  cv::filter2D(upy, upy, CV_64FC1, Kernel::bwd_y, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
+  cv::filter2D(upx, upx, CV_64FC1, ChanVese::Kernel::bwd_x, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
+  cv::filter2D(upy, upy, CV_64FC1, ChanVese::Kernel::bwd_y, cv::Point(-1, -1), 0, cv::BORDER_REPLICATE);
   upx += upy;
   return upx;
 }
@@ -1204,8 +707,8 @@ main(int argc,
        segment           = false,
        rectangle_contour = false,
        circle_contour    = false;
-  TextPosition pos = TextPosition::TopLeft;
-  cv::Scalar contour_color = Colors::blue;
+  ChanVese::TextPosition pos = ChanVese::TextPosition::TopLeft;
+  cv::Scalar contour_color = ChanVese::Colors::blue;
 
 //-- Parse command line arguments
 //   Negative values in multitoken are not an issue, b/c it doesn't make much sense
@@ -1295,10 +798,10 @@ main(int argc,
       msg_exit("Cannot have negative tolerance: " + std::to_string(tol) + ".");
     if(vm.count("overlay-pos"))
     {
-      if     (boost::iequals(text_position, "TL")) pos = TextPosition::TopLeft;
-      else if(boost::iequals(text_position, "BL")) pos = TextPosition::BottomLeft;
-      else if(boost::iequals(text_position, "TR")) pos = TextPosition::TopRight;
-      else if(boost::iequals(text_position, "BR")) pos = TextPosition::BottomRight;
+      if     (boost::iequals(text_position, "TL")) pos = ChanVese::TextPosition::TopLeft;
+      else if(boost::iequals(text_position, "BL")) pos = ChanVese::TextPosition::BottomLeft;
+      else if(boost::iequals(text_position, "TR")) pos = ChanVese::TextPosition::TopRight;
+      else if(boost::iequals(text_position, "BR")) pos = ChanVese::TextPosition::BottomRight;
       else
         msg_exit("Invalid text position requested.\n"\
                  "Correct values are: TL -- top left\n"\
@@ -1309,14 +812,14 @@ main(int argc,
     }
     if(vm.count("line-color"))
     {
-      if     (boost::iequals(line_color_str, "red"))     contour_color = Colors::red;
-      else if(boost::iequals(line_color_str, "green"))   contour_color = Colors::green;
-      else if(boost::iequals(line_color_str, "blue"))    contour_color = Colors::blue;
-      else if(boost::iequals(line_color_str, "black"))   contour_color = Colors::black;
-      else if(boost::iequals(line_color_str, "white"))   contour_color = Colors::white;
-      else if(boost::iequals(line_color_str, "magenta")) contour_color = Colors::magenta;
-      else if(boost::iequals(line_color_str, "yellow"))  contour_color = Colors::yellow;
-      else if(boost::iequals(line_color_str, "cyan"))    contour_color = Colors::cyan;
+      if     (boost::iequals(line_color_str, "red"))     contour_color = ChanVese::Colors::red;
+      else if(boost::iequals(line_color_str, "green"))   contour_color = ChanVese::Colors::green;
+      else if(boost::iequals(line_color_str, "blue"))    contour_color = ChanVese::Colors::blue;
+      else if(boost::iequals(line_color_str, "black"))   contour_color = ChanVese::Colors::black;
+      else if(boost::iequals(line_color_str, "white"))   contour_color = ChanVese::Colors::white;
+      else if(boost::iequals(line_color_str, "magenta")) contour_color = ChanVese::Colors::magenta;
+      else if(boost::iequals(line_color_str, "yellow"))  contour_color = ChanVese::Colors::yellow;
+      else if(boost::iequals(line_color_str, "cyan"))    contour_color = ChanVese::Colors::cyan;
       else
         msg_exit("Invalid contour color requested.\n"\
                  "Correct values are: red, green, blue, black, white, magenta, yellow, cyan.");
@@ -1430,8 +933,8 @@ main(int argc,
     {
       cv::Mat channel = channels[k];
 //-- Find the average regional variances
-      const double c1 = region_variance(channel, u, h, w, Region::Inside, heaviside);
-      const double c2 = region_variance(channel, u, h, w, Region::Outside, heaviside);
+      const double c1 = region_variance(channel, u, h, w, ChanVese::Region::Inside, heaviside);
+      const double c2 = region_variance(channel, u, h, w, ChanVese::Region::Outside, heaviside);
 
 //-- Calculate the contribution of one channel to the level set
       const cv::Mat variance_inside = variance_penalty(channel, h, w, c1, lambda1[k]);

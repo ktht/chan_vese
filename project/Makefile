@@ -30,7 +30,8 @@ LIBS     = -lopencv_core \
            -lboost_system \
            -lboost_filesystem
 
-SRCS      = main.cpp
+SRCS      = FontParameters.cpp InteractiveData.cpp InteractiveDataRect.cpp InteractiveDataCirc.cpp \
+            ParallelPixelFunction.cpp VideoWriterManager.cpp main.cpp
 TEST      =
 OBJS      = $(SRCS:%.cpp=$(OBJ_PATH)/%.o)
 TEST_OBJS = $(TEST:%.cpp=$(OBJ_PATH)/%.o)
