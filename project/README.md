@@ -73,5 +73,7 @@ Image courtesy: Wikimedia Commons ([original](https://upload.wikimedia.org/wikip
 ### References
 
 [<a name="perona_malik">1</a>] [Scale-space and edge detection using anisotropic diffusion](http://dx.doi.org/10.1109/34.56205)
+
 [<a name="csv">2</a>] [Active Contours without Edges for Vector-Valued Images](http://dx.doi.org/10.1006/jvci.1999.0442)
+
 [<a name="chan_vese">3</a>] [Chan-Vese Segmentation](http://dx.doi.org/10.5201/ipol.2012.g-cv)
