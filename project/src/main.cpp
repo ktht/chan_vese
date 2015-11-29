@@ -230,6 +230,15 @@ struct InteractiveDataRect
 
     if(clicked)
     {
+      if(P1.x < 0) P1.x = 0;
+      if(P2.x < 0) P2.x = 0;
+      if(P1.x > img -> cols) P1.x = img -> cols;
+      if(P2.x > img -> cols) P2.x = img -> cols;
+      if(P1.y < 0) P1.y = 0;
+      if(P2.y < 0) P2.y = 0;
+      if(P1.y > img -> rows) P1.y = img -> rows;
+      if(P2.y > img -> rows) P2.y = img -> rows;
+
       roi.x = std::min(P1.x, P2.x);
       roi.y = std::min(P1.y, P2.y);
       roi.width = std::abs(P1.x - P2.x);
@@ -1433,7 +1442,7 @@ main(int argc,
     const cv::Mat kappa = curvature(u, h, w);
 
 //-- Mash the terms together
-    u_diff = dt * (kappa + mu * (u_diff / nof_channels - nu));
+    u_diff = dt * (mu * kappa - nu + u_diff / nof_channels);
 
 //-- Run delta function on the level set
     cv::Mat u_cp = u.clone();
