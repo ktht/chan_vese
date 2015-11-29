@@ -21,12 +21,16 @@ To build, just do `make` but make sure that your compiler sees the libs and head
 Both methods summed up in a couple of sentences:
 
 - Perona-Malik segmentation is an improvement from classical Gaussian blur, the kernel of which is a solution to heat equation. Perona and Malik improved upon it by promoting the diffusion constant *c* in the heat equation to a function of the image *I* gradient magnitude aka edge detection function <sup>[1](#perona_malik)</sup>:
-![perona_malik](https://cloud.githubusercontent.com/assets/6233872/11458912/d8760df8-96d2-11e5-9de6-f6cd34680b72.png)
-Thus, when a region contains no edges (image gradient small), it will be Gaussian-smoothed; when the edge detection function encounters an edge it will not be smoothed but even enhanced.
+
+    ![perona_malik](https://cloud.githubusercontent.com/assets/6233872/11458912/d8760df8-96d2-11e5-9de6-f6cd34680b72.png)
+
+    Thus, when a region contains no edges (image gradient small), it will be Gaussian-smoothed; when the edge detection function encounters an edge it will not be smoothed but even enhanced.
 
 - Chan-Sandberg-Vese (or Chan-Vese for a single-channel image) formulates optimal contour in the image by defining a functional dependant on zero-level set *u*
-![csv_functional](https://cloud.githubusercontent.com/assets/6233872/11458911/d3856c26-96d2-11e5-9e20-16f043a1dd47.png)
-where the 1st term penalizes length of the contour; the 2nd term area enclosed by the contour; the 3rd and 4th terms penalize discrepancy between the intensity averages inside and outside of the contour <sup>[2](#csv)</sup> <sup>[3](#chan_vese)</sup>. The corresponding equation of motion for the zero level set can be solved implicitly (read: fast).
+
+    ![csv_functional](https://cloud.githubusercontent.com/assets/6233872/11458911/d3856c26-96d2-11e5-9e20-16f043a1dd47.png)
+
+    where the 1st term penalizes length of the contour; the 2nd term area enclosed by the contour; the 3rd and 4th terms penalize discrepancy between the intensity averages inside and outside of the contour <sup>[2](#csv)</sup> <sup>[3](#chan_vese)</sup>. The corresponding equation of motion for the zero level set can be solved implicitly (read: fast).
 
 For further information, see the documentation or check the references given below.
 
@@ -61,6 +65,7 @@ Image courtesy: Wikimedia Commons ([original](https://upload.wikimedia.org/wikip
 ---
 
 An alternative to initializing the level set with a checkerboard pattern seen above is to let users specify either rectangular or circular contour:
+
 ![screenshot from 2015-11-29 18 20 56](https://cloud.githubusercontent.com/assets/6233872/11458311/19667b48-96c6-11e5-86c1-ecf890041510.png)
 
 Image courtesy: Wikimedia Commons ([original](https://upload.wikimedia.org/wikipedia/commons/thumb/c/cf/View_of_Earth_is_based_largely_on_observations_from_MODIS.jpg/320px-View_of_Earth_is_based_largely_on_observations_from_MODIS.jpg))
