@@ -862,14 +862,16 @@ main(int argc,
   cv::Mat u;
   if(rectangle_contour || circle_contour)
   {
-    InteractiveData * id = nullptr;
+    std::unique_ptr<InteractiveData> id;
     cv::startWindowThread();
     cv::namedWindow(WINDOW_TITLE, cv::WINDOW_NORMAL);
 
-    if     (rectangle_contour)   id = new InteractiveDataRect(&img, contour_color);
-    else if(circle_contour)      id = new InteractiveDataCirc(&img, contour_color);
+    if     (rectangle_contour)
+      id = std::unique_ptr<InteractiveDataRect>(new InteractiveDataRect(&img, contour_color));
+    else if(circle_contour)
+      id = std::unique_ptr<InteractiveDataCirc>(new InteractiveDataCirc(&img, contour_color));
 
-    if(id) cv::setMouseCallback(WINDOW_TITLE, on_mouse, id);
+    if(id) cv::setMouseCallback(WINDOW_TITLE, on_mouse, id.get());
     cv::imshow(WINDOW_TITLE, img);
     cv::waitKey();
     cv::destroyWindow(WINDOW_TITLE);
@@ -879,7 +881,6 @@ main(int argc,
       if(! id -> is_ok())
         msg_exit("You must specify the contour with non-zero dimensions");
       u = id -> get_levelset(h, w);
-      delete id;
     }
   }
   else
