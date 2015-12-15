@@ -39,7 +39,6 @@
 
 #if defined(_WIN32)
 #include <windows.h> // CONSOLE_SCREEN_BUFFER_INFO, GetConsoleScreenBufferInfo, GetStdHandle, STD_OUTPUT_HANDLE
-#include <curses.h>
 #elif defined(__unix__)
 #include <sys/ioctl.h> // struct winsize, ioctl(), TIOCGWINSZ
 #endif
