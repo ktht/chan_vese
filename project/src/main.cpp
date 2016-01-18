@@ -100,15 +100,18 @@ const cv::Mat ChanVese::Kernel::ctr_y = (cv::Mat_<double>(3, 1) << -0.5,0,0.5);
 int
 get_terminal_width()
 {
+  int terminal_width = 80; // default
 #if defined(_WIN32)
   CONSOLE_SCREEN_BUFFER_INFO csbi;
   GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi);
-  return static_cast<int>(csbi.srWindow.Right - csbi.srWindow.Left + 1);
+  terminal_width = static_cast<int>(csbi.srWindow.Right -
+                                    csbi.srWindow.Left  + 1);
 #elif defined(unix) || defined(__unix__) || defined(__unix)
   struct winsize max;
   ioctl(0, TIOCGWINSZ, &max);
-  return static_cast<int>(max.ws_col);
+  terminal_width = static_cast<int>(max.ws_col);
 #endif
+  return terminal_width;
 }
 
 /**
