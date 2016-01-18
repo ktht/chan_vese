@@ -104,7 +104,7 @@ get_terminal_width()
   CONSOLE_SCREEN_BUFFER_INFO csbi;
   GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &csbi);
   return static_cast<int>(csbi.srWindow.Right - csbi.srWindow.Left + 1);
-#elif defined(__unix__)
+#elif defined(unix) || defined(__unix__) || defined(__unix)
   struct winsize max;
   ioctl(0, TIOCGWINSZ, &max);
   return static_cast<int>(max.ws_col);
