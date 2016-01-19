@@ -14,14 +14,7 @@ ifdef DEBUG
   CXXFLAGS += -O0 -g3 -ggdb3
 else
   CXXFLAGS += -O3 -g0 -ggdb0 -fno-unsafe-math-optimizations -fno-associative-math
-  ifeq ($(OS),Windows_NT)
-    LDFLAGS  += -s
-  else
-    UNAME_S = $(shell uname -s)
-    ifneq ($(UNAME_S)$(LD),Darwinbfd)
-      LDFLAGS += -s
-    endif
-  endif
+  LDFLAGS  += -s
 endif
 
 SOURCE_PATH   = src
