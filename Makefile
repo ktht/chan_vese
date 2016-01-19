@@ -1,8 +1,14 @@
 CXX        = g++
 LD         = bfd
+STDLIB     = libstdc++
+
 WFLAGS     = -Wall -Wextra -Wno-unused -Werror
 CXXFLAGS  += $(WFLAGS) -std=c++14 -fopenmp -DNUM_THREADS=3
 LDFLAGS    = -fuse-linker-plugin -flto -fuse-ld=$(LD)
+
+ifneq (,$(findstring clang,$(CXX)))
+  LDFLAGS  += -stdlib=$(STDLIB)
+endif
 
 ifdef DEBUG
   CXXFLAGS += -O0 -g3 -ggdb3
