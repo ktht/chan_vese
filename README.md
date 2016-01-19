@@ -9,12 +9,18 @@ The resulting contour is used to cut out ROI from the original image.
 
 Implementation relies on (version number the code was tested with)
 
-- OpenCV (2.4.8);
-- Boost libraries (1.59.0) (program_options and filesystem libs);
+- OpenCV (2.4.8) (`opencv_core`, `opencv_imgproc` and `opencv_highgui` libs);
+- Boost libraries (1.59.0) (`program_options`, `system` and `filesystem` libs);
 - OpenMP (4.0);
 
-The compiler must be compatible with the latest C++14 standard (clang 3.6+ or gcc 5.0+ will do ok).
+The compiler must be compatible with the latest C++14 standard (`clang` 3.6+ or `gcc` 5.0+ will do ok).
+
+#### Build options
+
 To build, just do `make` but make sure that your compiler sees the libs and headers listed above; to read the documentation, do `make doc`; to see all possible command line arguments, do `bin/chan_vese -h`.
+
+If you want to enable debugging symbols in the binary, build it with `DEBUG` variable defined, e.g. `DEBUG=1 make`; 
+If you want to build it with multithreaded boost libraries, build the project with `MT` variable defined, e.g. `MT=1 make`; or you could edit the library names by hand in the `Makefile`.
 
 ### Theory
 

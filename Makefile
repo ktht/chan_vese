@@ -1,13 +1,21 @@
 CXX        = g++
+LD         = bfd
 WFLAGS     = -Wall -Wextra -Wno-unused -Werror
 CXXFLAGS  += $(WFLAGS) -std=c++14 -fopenmp -DNUM_THREADS=3
-LDFLAGS    = -flto -fuse-linker-plugin
+LDFLAGS    = -fuse-linker-plugin -flto -fuse-ld=$(LD)
 
 ifdef DEBUG
   CXXFLAGS += -O0 -g3 -ggdb3
 else
   CXXFLAGS += -O3 -g0 -ggdb0 -fno-unsafe-math-optimizations -fno-associative-math
-  LDFLAGS  += -s
+  ifeq ($(OS),Windows_NT)
+    LDFLAGS  += -s
+  else
+    UNAME_S = $(shell uname -s)
+    ifneq ($(UNAME_S)$(LD),Darwinbfd)
+      LDFLAGS += -s
+    endif
+  endif
 endif
 
 SOURCE_PATH   = src
@@ -20,15 +28,19 @@ TEST_PATH     = test
 TEST_BIN_PATH = $(BIN_PATH)/$(TEST_PATH)
 DOC_DIR       = doc/html
 
+ifneq ($(MT),)
+  MT_ = -mt
+endif
+
 INCLUDES = -I$(INCLUDE_PATH) \
            -I$(BOOST_PATH)/include
 LD_PATHS = -L$(BOOST_PATH)/lib
 LIBS     = -lopencv_core \
            -lopencv_imgproc \
            -lopencv_highgui \
-           -lboost_program_options \
-           -lboost_system \
-           -lboost_filesystem
+           -lboost_program_options$(MT_) \
+           -lboost_system$(MT_) \
+           -lboost_filesystem$(MT_)
 
 SRCS      = FontParameters.cpp InteractiveData.cpp InteractiveDataRect.cpp InteractiveDataCirc.cpp \
             ParallelPixelFunction.cpp VideoWriterManager.cpp main.cpp
