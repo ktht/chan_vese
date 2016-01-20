@@ -31,9 +31,8 @@ ifneq ($(MT),)
   MT_ = -mt
 endif
 
-INCLUDES = -I$(INCLUDE_PATH) \
-           -I$(BOOST_PATH)/include
-LD_PATHS = -L$(BOOST_PATH)/lib
+INCLUDES = -I$(INCLUDE_PATH)
+LD_PATHS = 
 LIBS     = -lopencv_core \
            -lopencv_imgproc \
            -lopencv_highgui \
