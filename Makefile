@@ -19,7 +19,6 @@ endif
 
 SOURCE_PATH   = src
 INCLUDE_PATH  = include
-PYTHON_PATH   = python
 OBJ_PATH      = obj
 DEP_PATH      = dep
 BIN_PATH      = bin
