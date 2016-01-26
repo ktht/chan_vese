@@ -76,6 +76,44 @@ An alternative to initializing the level set with a checkerboard pattern seen ab
 
 Image courtesy: Wikimedia Commons ([original](https://upload.wikimedia.org/wikipedia/commons/thumb/c/cf/View_of_Earth_is_based_largely_on_observations_from_MODIS.jpg/320px-View_of_Earth_is_based_largely_on_observations_from_MODIS.jpg))
 
+### Further ideas
+
+- Algorithm-specific:
+       - add level set reinitialization
+           - some sources suggest that this avoids @em flattening of the zero-level set
+       - consider other color spaces than RGB, e.g. YUV (experimental)
+       - subpixel segmentation (experimental)
+           - perform segmentation on an enlarged image, then scale back to original size
+       - implicit instead of explicit scheme
+           - should improve convergence rate (however, it might be the case that
+             implicit scheme requires more compuational power and thus levels off the gain
+             in convergence rate)
+           - might provide better numerical stability
+           - needs preliminary analysis
+       - determine proper stopping condition (needs preliminary analysis)
+           - current stopping condition is rather arbitrary
+- Implementation-specific:
+       - consider optional headless (i.e. non-GUI) build
+           - would make the Qt dependency optional
+       - drop the @code Makefile @endcode and switch to [cmake](https://cmake.org/)
+           - would provide a better compatibility with different platforms, compilers and
+             build systems (e.g. [ninja](https://ninja-build.org/))
+       - develop a method to test the algorithm
+           - first, dig in the literature to see, whether there exist any well-accepted systematic
+             methods to test an image segmentation algorithm
+                - is there a universal/standard set of images (segmented and non-segmented)
+                  to test with?
+                - if so, how to assess the deviation from a perfectly segmented image?
+                  *L<sub>2</sub>* norm of the difference over *L<sub>2</sub>* of the perfectly segmented image?
+           - look for an automated solution
+       - provide an interface to the algorithm
+           - currently, the drawback is that the whole thing sits in the main() function
+           - the greater picture here is that CSV+PM is supposed to be an intermediate step
+             in a more robust image segmentation algorithm
+                - one idea, for instance, is that the input parameters are found by analyzing
+                  the original image
+                - consider implementing a training algorithm as a possibility
+
 ### References
 
 [<a name="perona_malik">1</a>] [Scale-space and edge detection using anisotropic diffusion](http://dx.doi.org/10.1109/34.56205)
