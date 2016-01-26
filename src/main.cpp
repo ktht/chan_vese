@@ -62,7 +62,7 @@
  *           - perform segmentation on an enlarged image, then scale back to original size
  *       - implicit instead of explicit scheme
  *           - should improve convergence rate (however, it might be the case that
- *             implicit scheme requires more compuational power and thus levels off the gain
+ *             implicit scheme requires more computational power and thus levels off the gain
  *             in convergence rate)
  *           - might provide better numerical stability
  *           - needs preliminary analysis
@@ -71,7 +71,7 @@
  * Implementation-specific:
  *       - consider optional headless (i.e. non-GUI) build
  *           - would make the Qt dependency optional
- *       - drop the @code Makefile @endcode and switch to <a href="https://cmake.org/">cmake</a>
+ *       - drop the Makefile and switch to <a href="https://cmake.org/">cmake</a>
  *           - would provide a better compatibility with different platforms, compilers and
  *             build systems (e.g. <a href="https://ninja-build.org/">ninja</a>)
  *       - develop a method to test the algorithm
@@ -84,7 +84,7 @@
  *           - look for an automated solution
  *       - provide an interface to the algorithm
  *           - currently, the drawback is that the whole thing sits in the main() function
- *           - the greater picture here is that CSV+PM is supposed to be an intermediate step
+ *           - the greater picture here is that PM+CSV is supposed to be an intermediate step
  *             in a more robust image segmentation algorithm
  *                - one idea, for instance, is that the input parameters are found by analyzing
  *                  the original image
